@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>eth2base — USDC Ethereum → Base via CCTP</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>eth2base</h1>
+      <p class="sub">Move native USDC from Ethereum to Base with Circle's CCTP V2. You sign one burn on Ethereum, then Circle mints on Base and takes its fee out of the amount. You need no ETH on Base.</p>
+    </header>
+
+    <section class="card">
+      <div class="row between">
+        <span id="account" class="muted">Not connected</span>
+        <button id="connect">Connect wallet</button>
+      </div>
+      <div class="row between" id="balances" hidden>
+        <span>USDC on Ethereum: <b id="balEth">–</b></span>
+        <span>USDC on Base: <b id="balBase">–</b></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <label for="amount">Amount (USDC)</label>
+      <div class="row">
+        <input id="amount" type="text" inputmode="decimal" placeholder="0.00" autocomplete="off">
+        <button id="max" class="ghost" type="button">Max</button>
+      </div>
+
+      <label for="recipient">Recipient on Base</label>
+      <input id="recipient" type="text" placeholder="0x… (defaults to your address)" autocomplete="off" spellcheck="false">
+
+      <fieldset>
+        <legend>Speed</legend>
+        <label class="radio"><input type="radio" name="mode" value="fast" checked> Fast (about a minute) <span class="muted" id="feeFast"></span></label>
+        <label class="radio"><input type="radio" name="mode" value="standard"> Standard (about 15–20 min, Ethereum finality) <span class="muted" id="feeStd"></span></label>
+      </fieldset>
+
+      <p id="receive" class="receive"></p>
+      <button id="bridge" class="primary" disabled>Bridge to Base</button>
+    </section>
+
+    <section class="card" id="progress" hidden>
+      <ol id="steps">
+        <li data-step="approve">Approve USDC</li>
+        <li data-step="burn">Burn on Ethereum</li>
+        <li data-step="attest">Wait for Circle attestation</li>
+        <li data-step="mint">Circle mints on Base</li>
+      </ol>
+      <div id="status" class="status"></div>
+      <button id="manualMint" hidden>Mint manually on Base</button>
+    </section>
+
+    <details class="card">
+      <summary>Resume a transfer</summary>
+      <p class="muted">Closed the page mid-transfer? Paste the burn transaction hash to check on it.</p>
+      <div class="row">
+        <input id="resumeHash" type="text" placeholder="0x… burn tx hash" spellcheck="false">
+        <button id="resume">Resume</button>
+      </div>
+    </details>
+
+    <footer class="muted">
+      Contracts: TokenMessengerV2 <code>0x28b5…cf5d</code>, MessageTransmitterV2 <code>0x81D4…4B64</code>. Attestations and the Base mint come from Circle (<code>iris-api.circle.com</code>, Forwarding Service).
+      Use at your own risk. <a href="https://github.com/SwapMarket/eth2base" target="_blank" rel="noopener">Source code</a>
+    </footer>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
