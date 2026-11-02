@@ -75,6 +75,7 @@ let fees = null; // { fast: { bps, forward }, standard: { bps, forward } }, forw
 let balanceEth = 0n;
 let pendingMint = null; // { message, attestation, nonce } for the manual fallback
 let manualMintTx = null;
+let viaWalletConnect = false;
 let pendingSwap = null; // { burned, amountIn, recipient } for the EURC swap
 
 // ---------- UI helpers ----------
@@ -102,6 +103,9 @@ function resetSteps() {
 
 const fmt = (v) => Number(formatUnits(v, 6)).toLocaleString(undefined, { maximumFractionDigits: 6 });
 const fmtEth = (v) => Number(formatUnits(v, 18)).toLocaleString(undefined, { maximumFractionDigits: 6 });
+// Where to look for the signing prompt. Over WalletConnect the request goes to the phone app,
+// which often shows nothing until it is opened.
+const inWallet = () => (viaWalletConnect ? 'in your wallet app. Open it on your phone, as the request may not pop up by itself' : 'in your wallet');
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const ethTx = (h) => `<a href="https://etherscan.io/tx/${h}" target="_blank" rel="noopener">${short(h)}</a>`;
 const baseTx = (h) => `<a href="https://basescan.org/tx/${h}" target="_blank" rel="noopener">${short(h)}</a>`;
@@ -202,6 +206,7 @@ function refreshForm() {
 async function getProvider() {
   if (window.ethereum) {
     await window.ethereum.request({ method: 'eth_requestAccounts' });
+    viaWalletConnect = false;
     return window.ethereum;
   }
   const { EthereumProvider } = await import('https://esm.sh/@walletconnect/ethereum-provider@2.17.2');
@@ -220,6 +225,7 @@ async function getProvider() {
   });
   await provider.enable();
   provider.on('disconnect', () => setAccount(null));
+  viaWalletConnect = true;
   return provider;
 }
 
@@ -233,7 +239,7 @@ async function connect() {
 
 function setAccount(addr) {
   account = addr ? getAddress(addr) : null;
-  $('account').textContent = account ? `Connected: ${short(account)}` : 'Not connected';
+  $('account').textContent = account ? `Connected${viaWalletConnect ? ' via WalletConnect' : ''}: ${short(account)}` : 'Not connected';
   $('connect').textContent = account ? 'Connected' : 'Connect wallet';
   $('connect').disabled = !!account;
   $('balances').hidden = !account;
@@ -261,6 +267,7 @@ async function refreshBalances() {
 async function ensureChain(chain) {
   const current = await wallet.getChainId();
   if (current === chain.id) return;
+  setStatus(`Approve switching the network to ${chain.name} ${inWallet()}…`);
   try {
     await wallet.switchChain({ id: chain.id });
   } catch (e) {
@@ -335,7 +342,7 @@ async function bridge() {
       address: USDC_ETH, abi: erc20Abi, functionName: 'allowance', args: [account, TOKEN_MESSENGER],
     });
     if (allowance < amount) {
-      setStatus('Confirm the USDC approval in your wallet…');
+      setStatus(`Confirm the USDC approval ${inWallet()}…`);
       const hash = await wallet.writeContract({
         account, chain: mainnet, address: USDC_ETH, abi: erc20Abi,
         functionName: 'approve', args: [TOKEN_MESSENGER, amount],
@@ -350,7 +357,7 @@ async function bridge() {
 
     // 2. Burn, with the forwarding hook so Circle mints on Base
     setStep('burn', 'active');
-    setStatus('Confirm the burn in your wallet…');
+    setStatus(`Confirm the burn ${inWallet()}…`);
     const burnHash = await wallet.writeContract({
       account, chain: mainnet, address: TOKEN_MESSENGER, abi: tokenMessengerAbi,
       functionName: 'depositForBurnWithHook',
@@ -488,7 +495,7 @@ async function manualMint() {
       return; // track() notices on its next poll
     }
     await ensureChain(base);
-    setStatus('Confirm the mint on Base in your wallet…');
+    setStatus(`Confirm the mint on Base ${inWallet()}…`);
     const hash = await wallet.writeContract({
       account, chain: base, address: MESSAGE_TRANSMITTER, abi: transmitterAbi,
       functionName: 'receiveMessage', args: [message, attestation],
@@ -528,7 +535,7 @@ async function swapToEurc() {
       address: USDC_BASE, abi: erc20Abi, functionName: 'allowance', args: [account, AERO_ROUTER],
     });
     if (allowance < amountIn) {
-      setStatus('Confirm the USDC approval for Aerodrome in your wallet…');
+      setStatus(`Confirm the USDC approval for Aerodrome ${inWallet()}…`);
       const hash = await wallet.writeContract({
         account, chain: base, address: USDC_BASE, abi: erc20Abi,
         functionName: 'approve', args: [AERO_ROUTER, amountIn],
@@ -540,7 +547,7 @@ async function swapToEurc() {
 
     const { amountOut, tickSpacing } = await quoteEurc(amountIn);
     const amountOutMinimum = (amountOut * (10_000n - SLIPPAGE_BPS)) / 10_000n;
-    setStatus(`Confirm the swap of ${fmt(amountIn)} USDC for about ${fmt(amountOut)} EURC in your wallet…`);
+    setStatus(`Confirm the swap of ${fmt(amountIn)} USDC for about ${fmt(amountOut)} EURC ${inWallet()}…`);
     const hash = await wallet.writeContract({
       account, chain: base, address: AERO_ROUTER, abi: routerAbi, functionName: 'exactInputSingle',
       args: [{
