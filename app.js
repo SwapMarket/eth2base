@@ -39,7 +39,10 @@ const FORWARD_HOOK = '0x636374702d666f727761726400000000000000000000000000000000
 const FORWARD_GRACE_MS = 10 * 60 * 1000;
 // Reown (WalletConnect) project ID, used when no injected wallet is present (e.g. mobile browsers).
 const WALLETCONNECT_PROJECT_ID = 'c001d9e3d0c6308a5ce7e5932d40064a';
-const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+// Also catches Chrome's "Desktop site" mode on phones, which drops "Android" from the user agent.
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+  || navigator.userAgentData?.mobile === true
+  || (matchMedia('(pointer: coarse)').matches && !matchMedia('(any-pointer: fine)').matches);
 
 const erc20Abi = parseAbi([
   'function balanceOf(address) view returns (uint256)',
