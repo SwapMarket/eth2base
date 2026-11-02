@@ -606,6 +606,12 @@ $('amount').oninput = refreshForm;
 $('max').onclick = () => { $('amount').value = formatUnits(balanceEth, 6); refreshForm(); };
 for (const r of document.querySelectorAll('input[name=mode], input[name=out]')) r.onchange = refreshForm;
 
+// The deploy workflow stamps the commit into the footer; unstamped (local) copies link to the repo.
+if ($('commit').textContent.startsWith('__')) {
+  $('commit').textContent = 'dev';
+  $('commit').href = 'https://github.com/SwapMarket/eth2base';
+}
+
 loadPending();
 loadFees();
 setInterval(loadFees, 30_000);
