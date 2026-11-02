@@ -44,6 +44,9 @@ h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .row.between { justify-content: space-between; }
 #balances { margin-top: 12px; font-size: 14px; }
+.bal { display: grid; grid-template-columns: 72px 1fr; padding: 4px 0; }
+.bal .chain { color: var(--muted); }
+.bal .vals { display: flex; flex-wrap: wrap; gap: 2px 16px; }
 .muted { color: var(--muted); }
 
 label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 6px; }
@@ -96,7 +99,7 @@ button.ghost { background: transparent; }
 .status.err { color: var(--err); }
 .status.ok { color: var(--ok); }
 .status a { color: var(--accent); }
-#manualMint { margin-top: 12px; }
+#manualMint, #retrySwap { margin-top: 12px; }
 .receive { margin: 14px 0 0; font-size: 14px; font-weight: 600; }
 .receive:empty { display: none; }
 

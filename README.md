@@ -20,12 +20,18 @@ It can be deployed as-is to GitHub Pages, Netlify, Cloudflare Pages, etc.
 2. **Approve**: `USDC.approve(TokenMessengerV2, amount)` on Ethereum, skipped if the allowance is already enough.
 3. **Burn**: `TokenMessengerV2.depositForBurnWithHook(amount, 6, recipient, USDC, 0x0, maxFee, minFinalityThreshold, hookData)`.
    - `hookData` is Circle's Forwarding Service marker (`"cctp-forward"`, version 0), so **Circle mints on Base**. The user needs no ETH on Base.
-   - `maxFee` = CCTP protocol fee + forwarding fee (`high` tier from `GET /v2/burn/USDC/fees/0/6?forward=true`) + 10% buffer.
+   - `maxFee` = CCTP protocol fee + forwarding fee (`high` tier from `GET /v2/burn/USDC/fees/0/6?forward=true`).
+     With forwarding, Circle charges the full `maxFee` (`feeExecuted == maxFee`), so there is no extra buffer.
      It is **deducted from the amount**. The recipient gets `amount - fee`.
    - Fast: `minFinalityThreshold = 1000`. Standard: `2000`.
 4. **Track**: poll `GET https://iris-api.circle.com/v2/messages/0?transactionHash=…` until `forwardTxHash` (the Base mint) appears.
    If the message is attested but not forwarded within 10 minutes, the page offers a manual
    `MessageTransmitterV2.receiveMessage` on Base as a fallback. That fallback needs ETH on Base.
+5. **Optional, swap to EURC**: if "Receive as EURC" is chosen, the recipient (which must be the connected wallet) swaps the bridged USDC
+   on Aerodrome Slipstream: `approve` + `SwapRouter.exactInputSingle` (router `0xBE6D…18a5`, quoter `0x254c…15b0`). The page uses
+   the better of the tick-spacing 1 and 50 USDC/EURC pools, with 0.5% max slippage. It swaps only `amount - feeExecuted` of this
+   transfer, never other USDC in the wallet. This step needs a little ETH on Base for gas, because Circle's forwarder can only deliver USDC.
+   The page shows the end-to-end EUR/USD rate (USDC sent ÷ EURC received, all fees included), quoted before bridging and actual after the swap.
 
 The burn tx hash is saved in `localStorage`. **Resume a transfer** picks tracking back up after a reload.
 

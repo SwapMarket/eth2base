@@ -18,9 +18,9 @@
         <span id="account" class="muted">Not connected</span>
         <button id="connect">Connect wallet</button>
       </div>
-      <div class="row between" id="balances" hidden>
-        <span>USDC on Ethereum: <b id="balEth">–</b></span>
-        <span>USDC on Base: <b id="balBase">–</b></span>
+      <div id="balances" hidden>
+        <div class="bal"><span class="chain">Ethereum</span><span class="vals"><span><b id="balEth">–</b> USDC</span><span><b id="gasEth">–</b> ETH gas</span></span></div>
+        <div class="bal"><span class="chain">Base</span><span class="vals"><span><b id="balBase">–</b> USDC</span><span><b id="balEurc">–</b> EURC</span><span><b id="gasBase">–</b> ETH gas</span></span></div>
       </div>
     </section>
 
@@ -37,7 +37,13 @@
       <fieldset>
         <legend>Speed</legend>
         <label class="radio"><input type="radio" name="mode" value="fast" checked> Fast (about a minute) <span class="muted" id="feeFast"></span></label>
-        <label class="radio"><input type="radio" name="mode" value="standard"> Standard (about 15–20 min, Ethereum finality) <span class="muted" id="feeStd"></span></label>
+        <label class="radio"><input type="radio" name="mode" value="standard"> Standard (about 15–20 min) <span class="muted" id="feeStd"></span></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Receive as</legend>
+        <label class="radio"><input type="radio" name="out" value="USDC" checked> USDC</label>
+        <label class="radio"><input type="radio" name="out" value="EURC"> EURC, swapped on Aerodrome <span class="muted">· needs a little ETH on Base for gas</span></label>
       </fieldset>
 
       <p id="receive" class="receive"></p>
@@ -50,9 +56,11 @@
         <li data-step="burn">Burn on Ethereum</li>
         <li data-step="attest">Wait for Circle attestation</li>
         <li data-step="mint">Circle mints on Base</li>
+        <li data-step="swap" hidden>Swap USDC to EURC on Aerodrome</li>
       </ol>
       <div id="status" class="status"></div>
       <button id="manualMint" hidden>Mint manually on Base</button>
+      <button id="retrySwap" hidden>Swap to EURC</button>
     </section>
 
     <details class="card">

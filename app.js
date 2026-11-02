@@ -10,6 +10,7 @@ import {
   getAddress,
   pad,
   parseAbi,
+  parseEventLogs,
   zeroHash,
 } from 'https://esm.sh/viem@2.21.55';
 import { mainnet, base } from 'https://esm.sh/viem@2.21.55/chains';
@@ -19,6 +20,12 @@ const TOKEN_MESSENGER = '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d';
 const MESSAGE_TRANSMITTER = '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64';
 const USDC_ETH = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+const EURC_BASE = '0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42';
+// Aerodrome Slipstream (concentrated liquidity) on Base; USDC/EURC liquidity sits in these tick spacings.
+const AERO_ROUTER = '0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5';
+const AERO_QUOTER = '0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0';
+const AERO_TICK_SPACINGS = [1, 50];
+const SLIPPAGE_BPS = 50n; // 0.5%
 const DOMAIN_ETH = 0;
 const DOMAIN_BASE = 6;
 const IRIS = 'https://iris-api.circle.com';
@@ -36,6 +43,7 @@ const erc20Abi = parseAbi([
   'function balanceOf(address) view returns (uint256)',
   'function allowance(address owner, address spender) view returns (uint256)',
   'function approve(address spender, uint256 amount) returns (bool)',
+  'event Transfer(address indexed from, address indexed to, uint256 value)',
 ]);
 const tokenMessengerAbi = parseAbi([
   'function depositForBurnWithHook(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold, bytes hookData)',
@@ -43,6 +51,12 @@ const tokenMessengerAbi = parseAbi([
 const transmitterAbi = parseAbi([
   'function receiveMessage(bytes message, bytes attestation) returns (bool)',
   'function usedNonces(bytes32) view returns (uint256)',
+]);
+const quoterAbi = parseAbi([
+  'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, int24 tickSpacing, uint160 sqrtPriceLimitX96)) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
+]);
+const routerAbi = parseAbi([
+  'function exactInputSingle((address tokenIn, address tokenOut, int24 tickSpacing, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)',
 ]);
 
 const ethClient = createPublicClient({
@@ -60,6 +74,8 @@ let account = null;
 let fees = null; // { fast: { bps, forward }, standard: { bps, forward } }, forward in USDC base units
 let balanceEth = 0n;
 let pendingMint = null; // { message, attestation, nonce } for the manual fallback
+let manualMintTx = null;
+let pendingSwap = null; // { burned, amountIn, recipient } for the EURC swap
 
 // ---------- UI helpers ----------
 
@@ -76,11 +92,16 @@ function setStep(name, state) {
 
 function resetSteps() {
   for (const li of document.querySelectorAll('#steps li')) li.className = '';
+  document.querySelector('#steps li[data-step="swap"]').hidden = currentOut() !== 'EURC';
   $('manualMint').hidden = true;
+  $('retrySwap').hidden = true;
+  manualMintTx = null;
+  pendingSwap = null;
   $('progress').hidden = false;
 }
 
 const fmt = (v) => Number(formatUnits(v, 6)).toLocaleString(undefined, { maximumFractionDigits: 6 });
+const fmtEth = (v) => Number(formatUnits(v, 18)).toLocaleString(undefined, { maximumFractionDigits: 6 });
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const ethTx = (h) => `<a href="https://etherscan.io/tx/${h}" target="_blank" rel="noopener">${short(h)}</a>`;
 const baseTx = (h) => `<a href="https://basescan.org/tx/${h}" target="_blank" rel="noopener">${short(h)}</a>`;
@@ -97,18 +118,52 @@ function parseAmount() {
 }
 
 const currentMode = () => document.querySelector('input[name=mode]:checked').value;
+const currentOut = () => document.querySelector('input[name=out]:checked').value;
 
-// Max total fee (CCTP protocol fee + Circle forwarding fee) in USDC base units, with a 10% buffer.
+// Best USDC→EURC quote across the Aerodrome Slipstream pools: { amountOut, tickSpacing }.
+async function quoteEurc(amountIn) {
+  const quotes = await Promise.allSettled(AERO_TICK_SPACINGS.map((tickSpacing) =>
+    baseClient.simulateContract({
+      address: AERO_QUOTER, abi: quoterAbi, functionName: 'quoteExactInputSingle',
+      args: [{ tokenIn: USDC_BASE, tokenOut: EURC_BASE, amountIn, tickSpacing, sqrtPriceLimitX96: 0n }],
+    }).then(({ result }) => ({ amountOut: result[0], tickSpacing }))));
+  const ok = quotes.filter((q) => q.status === 'fulfilled').map((q) => q.value);
+  if (!ok.length) throw new Error('No Aerodrome quote for USDC → EURC');
+  return ok.reduce((a, b) => (b.amountOut > a.amountOut ? b : a));
+}
+
+let quoteSeq = 0;
+let quoteTimer = null;
+// End-to-end EUR/USD: USDC sent from Ethereum per EURC received on Base, all fees included.
+const eurUsd = (usdcSent, eurcOut) => (Number(usdcSent) / Number(eurcOut)).toFixed(4);
+
+function showEurcQuote(usdcSent, usdcIn) {
+  const seq = ++quoteSeq;
+  clearTimeout(quoteTimer);
+  quoteTimer = setTimeout(async () => {
+    let text;
+    try {
+      const { amountOut } = await quoteEurc(usdcIn);
+      text = `You receive about ${fmt(amountOut)} EURC on Base. Effective EUR/USD ${eurUsd(usdcSent, amountOut)}, all fees included (at least ${fmt(usdcIn)} USDC swapped at the current Aerodrome rate, max ${Number(SLIPPAGE_BPS) / 100}% slippage)`;
+    } catch (e) {
+      text = 'Could not get an Aerodrome quote right now.';
+    }
+    if (seq === quoteSeq) $('receive').textContent = text;
+  }, 400);
+}
+
+// Max total fee (CCTP protocol fee + Circle forwarding fee, "high" tier) in USDC base units.
+// With forwarding, Circle charges the full maxFee, so there is no extra buffer.
 // It is deducted from the burned amount on Base, never charged on top.
 function maxFeeFor(amount, mode) {
   const { bps, forward } = fees[mode];
   const ppm = BigInt(Math.ceil(bps * 100));
   const protocol = (amount * ppm + 999_999n) / 1_000_000n;
-  const fee = protocol + forward;
-  return fee + fee / 10n + 1n;
+  return protocol + forward;
 }
 
 function refreshForm() {
+  quoteSeq++; // drop any in-flight EURC quote
   const amt = parseAmount();
   for (const mode of ['fast', 'standard']) {
     const el = $(mode === 'fast' ? 'feeFast' : 'feeStd');
@@ -125,6 +180,9 @@ function refreshForm() {
     if (amt <= fee) {
       ok = false;
       label = 'Amount must be larger than the fee';
+    } else if (currentOut() === 'EURC') {
+      $('receive').textContent = 'Getting Aerodrome quote…';
+      showEurcQuote(amt, amt - fee);
     } else {
       $('receive').textContent = `You receive at least ${fmt(amt - fee)} USDC on Base`;
     }
@@ -184,13 +242,19 @@ function setAccount(addr) {
 
 async function refreshBalances() {
   if (!account) { balanceEth = 0n; refreshForm(); return; }
-  const [e, b] = await Promise.allSettled([
+  const [e, b, eu, ge, gb] = await Promise.allSettled([
     ethClient.readContract({ address: USDC_ETH, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
     baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
+    baseClient.readContract({ address: EURC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
+    ethClient.getBalance({ address: account }),
+    baseClient.getBalance({ address: account }),
   ]);
   balanceEth = e.status === 'fulfilled' ? e.value : 0n;
   $('balEth').textContent = e.status === 'fulfilled' ? fmt(e.value) : 'error';
   $('balBase').textContent = b.status === 'fulfilled' ? fmt(b.value) : 'error';
+  $('balEurc').textContent = eu.status === 'fulfilled' ? fmt(eu.value) : 'error';
+  $('gasEth').textContent = ge.status === 'fulfilled' ? fmtEth(ge.value) : 'error';
+  $('gasBase').textContent = gb.status === 'fulfilled' ? fmtEth(gb.value) : 'error';
   refreshForm();
 }
 
@@ -250,6 +314,11 @@ async function bridge() {
     }
     recipient = account;
   }
+  const out = currentOut();
+  if (out === 'EURC' && recipient !== account) {
+    alert('To receive EURC, the recipient must be your connected address: the swap on Base is signed by the wallet that receives the USDC.');
+    return;
+  }
 
   $('bridge').disabled = true;
   resetSteps();
@@ -287,14 +356,14 @@ async function bridge() {
       functionName: 'depositForBurnWithHook',
       args: [amount, DOMAIN_BASE, pad(recipient, { size: 32 }), USDC_ETH, zeroHash, maxFee, FINALITY[mode], FORWARD_HOOK],
     });
-    savePending(burnHash);
+    savePending(burnHash, out);
     setStatus(`Burn sent ${ethTx(burnHash)}, waiting for confirmation…`);
     const r = await ethClient.waitForTransactionReceipt({ hash: burnHash });
     if (r.status !== 'success') { clearPending(); throw new Error('Burn transaction reverted'); }
     setStep('burn', 'done');
     refreshBalances();
 
-    await track(burnHash, mode);
+    await finish(await track(burnHash, mode), out);
   } catch (e) {
     console.error(e);
     setStatus(errMsg(e), 'err');
@@ -310,15 +379,37 @@ async function resume() {
   setStep('approve', 'done');
   setStep('burn', 'done');
   try {
-    await track(hash);
+    await finish(await track(hash), currentOut());
   } catch (e) {
     console.error(e);
     setStatus(errMsg(e), 'err');
   }
 }
 
-// Poll Circle until the forwarder has minted on Base. If the attestation is complete
-// but nothing has been forwarded for a while, offer a manual mint as a fallback.
+// After the USDC is on Base: done, or continue with the Aerodrome swap.
+async function finish({ message: m, mintTx }, out) {
+  clearPending();
+  refreshBalances();
+  const minted = mintTx ? `USDC minted on Base ${baseTx(mintTx)}` : 'USDC is on Base';
+  if (out !== 'EURC') {
+    setStatus(`Done! ${minted}.`, 'ok');
+    return;
+  }
+  const body = m.decodedMessage?.decodedMessageBody;
+  if (!body?.amount || !body?.mintRecipient) {
+    setStatus(`${minted}, but the transfer amount couldn't be read, so no swap was made.`, 'err');
+    return;
+  }
+  // Swap only what this transfer delivered, never other USDC in the wallet.
+  const fee = BigInt(body.feeExecuted ?? body.maxFee ?? 0);
+  pendingSwap = { burned: BigInt(body.amount), amountIn: BigInt(body.amount) - fee, recipient: getAddress(`0x${body.mintRecipient.slice(-40)}`) };
+  setStatus(`${minted}. Now swapping to EURC…`);
+  await swapToEurc();
+}
+
+// Poll Circle until the USDC is minted on Base (by the forwarder, or manually as a fallback
+// when the attestation is complete but nothing has been forwarded for a while).
+// Resolves to { message, mintTx }.
 async function track(burnHash, mode) {
   setStep('attest', 'active');
   const wait = mode === 'standard' ? 'usually 15–20 minutes' : mode === 'fast' ? 'usually under a minute' : 'this can take a while';
@@ -343,10 +434,7 @@ async function track(burnHash, mode) {
     if (m?.forwardTxHash) {
       for (const s of ['attest', 'mint']) setStep(s, 'done');
       $('manualMint').hidden = true;
-      clearPending();
-      setStatus(`Done! Circle minted the USDC on Base ${baseTx(m.forwardTxHash)}.`, 'ok');
-      refreshBalances();
-      return;
+      return { message: m, mintTx: m.forwardTxHash };
     }
 
     if (m?.status === 'complete' && m.attestation && m.attestation !== 'PENDING') {
@@ -357,16 +445,17 @@ async function track(burnHash, mode) {
         setStatus('Attested. Waiting for Circle to mint on Base…');
       }
       pendingMint = { message: m.message, attestation: m.attestation, nonce: m.eventNonce };
-      if (Date.now() - attestedAt > FORWARD_GRACE_MS && $('manualMint').hidden) {
+      if (Date.now() - attestedAt > FORWARD_GRACE_MS) {
+        // Covers both a manual mint from this page and one made elsewhere.
         if (await alreadyMinted(m.eventNonce)) {
           setStep('mint', 'done');
-          clearPending();
-          setStatus('This transfer was already minted on Base.', 'ok');
-          refreshBalances();
-          return;
+          $('manualMint').hidden = true;
+          return { message: m, mintTx: manualMintTx };
         }
-        setStatus('Circle hasn\'t forwarded this transfer yet. You can keep waiting, or mint it yourself on Base (needs a little ETH on Base for gas).');
-        $('manualMint').hidden = false;
+        if ($('manualMint').hidden && !manualMintTx) {
+          setStatus('Circle hasn\'t forwarded this transfer yet. You can keep waiting, or mint it yourself on Base (needs a little ETH on Base for gas).');
+          $('manualMint').hidden = false;
+        }
       }
     }
 
@@ -393,12 +482,10 @@ async function manualMint() {
   try {
     if (!wallet) await connect();
     if (!account) return;
+    $('manualMint').hidden = true;
     if (await alreadyMinted(nonce)) {
-      setStep('mint', 'done');
-      clearPending();
-      $('manualMint').hidden = true;
-      setStatus('This transfer was already minted on Base.', 'ok');
-      return;
+      setStatus('Already minted on Base, finishing up…');
+      return; // track() notices on its next poll
     }
     await ensureChain(base);
     setStatus('Confirm the mint on Base in your wallet…');
@@ -409,31 +496,94 @@ async function manualMint() {
     setStatus(`Mint sent ${baseTx(hash)}, waiting for confirmation…`);
     const r = await baseClient.waitForTransactionReceipt({ hash });
     if (r.status !== 'success') throw new Error('Mint transaction reverted');
-    setStep('mint', 'done');
-    clearPending();
-    $('manualMint').hidden = true;
-    setStatus(`Done! USDC minted on Base ${baseTx(hash)}.`, 'ok');
+    manualMintTx = hash;
+    setStatus(`Minted on Base ${baseTx(hash)}, finishing up…`);
+  } catch (e) {
+    console.error(e);
+    $('manualMint').hidden = false;
+    setStatus(`Mint failed: ${errMsg(e)}. Your funds are safe; the attested message can be minted any time.`, 'err');
+  }
+}
+
+// Swap the bridged USDC to EURC on Aerodrome Slipstream, signed by the recipient on Base.
+async function swapToEurc() {
+  if (!pendingSwap) return;
+  const { recipient } = pendingSwap;
+  $('retrySwap').hidden = true;
+  setStep('swap', 'active');
+  try {
+    if (!wallet) await connect();
+    if (!account) throw new Error('Connect your wallet to swap.');
+    if (recipient !== account) throw new Error(`The USDC went to ${short(recipient)}. Connect that wallet to swap.`);
+
+    const balance = await baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] });
+    const amountIn = balance < pendingSwap.amountIn ? balance : pendingSwap.amountIn;
+    if (amountIn === 0n) throw new Error('No USDC on Base to swap.');
+    if ((await baseClient.getBalance({ address: account })) === 0n) {
+      throw new Error('You need a little ETH on Base to pay gas for the swap. Your USDC is already on Base; add some ETH and retry.');
+    }
+    await ensureChain(base);
+
+    const allowance = await baseClient.readContract({
+      address: USDC_BASE, abi: erc20Abi, functionName: 'allowance', args: [account, AERO_ROUTER],
+    });
+    if (allowance < amountIn) {
+      setStatus('Confirm the USDC approval for Aerodrome in your wallet…');
+      const hash = await wallet.writeContract({
+        account, chain: base, address: USDC_BASE, abi: erc20Abi,
+        functionName: 'approve', args: [AERO_ROUTER, amountIn],
+      });
+      setStatus(`Approval sent ${baseTx(hash)}, waiting for confirmation…`);
+      const r = await baseClient.waitForTransactionReceipt({ hash });
+      if (r.status !== 'success') throw new Error('Approval transaction reverted');
+    }
+
+    const { amountOut, tickSpacing } = await quoteEurc(amountIn);
+    const amountOutMinimum = (amountOut * (10_000n - SLIPPAGE_BPS)) / 10_000n;
+    setStatus(`Confirm the swap of ${fmt(amountIn)} USDC for about ${fmt(amountOut)} EURC in your wallet…`);
+    const hash = await wallet.writeContract({
+      account, chain: base, address: AERO_ROUTER, abi: routerAbi, functionName: 'exactInputSingle',
+      args: [{
+        tokenIn: USDC_BASE, tokenOut: EURC_BASE, tickSpacing, recipient: account,
+        deadline: BigInt(Math.floor(Date.now() / 1000) + 20 * 60),
+        amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n,
+      }],
+    });
+    setStatus(`Swap sent ${baseTx(hash)}, waiting for confirmation…`);
+    const r = await baseClient.waitForTransactionReceipt({ hash });
+    if (r.status !== 'success') throw new Error('Swap transaction reverted');
+    setStep('swap', 'done');
+    const eurcOut = parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: r.logs })
+      .filter((l) => l.address.toLowerCase() === EURC_BASE.toLowerCase() && l.args.to === account)
+      .reduce((sum, l) => sum + l.args.value, 0n);
+    // The rate is only end-to-end if the whole delivered amount was swapped.
+    const rate = amountIn === pendingSwap.amountIn ? ` Effective EUR/USD ${eurUsd(pendingSwap.burned, eurcOut)}, all fees included.` : '';
+    pendingSwap = null;
+    setStatus(`Done! Swapped ${fmt(amountIn)} USDC to ${fmt(eurcOut)} EURC on Aerodrome ${baseTx(hash)}.${rate}`, 'ok');
     refreshBalances();
   } catch (e) {
     console.error(e);
-    setStatus(`Mint failed: ${errMsg(e)}. Your funds are safe; the attested message can be minted any time.`, 'err');
+    setStatus(`Swap failed: ${errMsg(e)} Your USDC is safe on Base.`, 'err');
+    $('retrySwap').hidden = false;
   }
 }
 
 // ---------- pending-burn persistence ----------
 
-function savePending(hash) {
-  try { localStorage.setItem(PENDING_KEY, hash); } catch {}
+function savePending(hash, out) {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify({ hash, out })); } catch {}
 }
 function clearPending() {
   try { localStorage.removeItem(PENDING_KEY); } catch {}
 }
 function loadPending() {
   try {
-    const h = localStorage.getItem(PENDING_KEY);
-    if (h) {
-      $('resumeHash').value = h;
+    const raw = localStorage.getItem(PENDING_KEY);
+    if (raw) {
+      const { hash, out } = raw.startsWith('{') ? JSON.parse(raw) : { hash: raw, out: 'USDC' };
+      $('resumeHash').value = hash;
       $('resumeHash').closest('details').open = true;
+      document.querySelector(`input[name=out][value="${out === 'EURC' ? 'EURC' : 'USDC'}"]`).checked = true;
     }
   } catch {}
 }
@@ -444,9 +594,10 @@ $('connect').onclick = () => connect().catch((e) => alert(errMsg(e)));
 $('bridge').onclick = bridge;
 $('resume').onclick = resume;
 $('manualMint').onclick = manualMint;
+$('retrySwap').onclick = swapToEurc;
 $('amount').oninput = refreshForm;
 $('max').onclick = () => { $('amount').value = formatUnits(balanceEth, 6); refreshForm(); };
-for (const r of document.querySelectorAll('input[name=mode]')) r.onchange = refreshForm;
+for (const r of document.querySelectorAll('input[name=mode], input[name=out]')) r.onchange = refreshForm;
 
 loadPending();
 loadFees();
