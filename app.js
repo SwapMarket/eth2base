@@ -237,7 +237,7 @@ async function getProvider() {
       name: 'eth2base',
       description: 'Bridge USDC from Ethereum to Base with CCTP',
       url: location.origin,
-      icons: [],
+      icons: [new URL('icon.png', location.href).href],
     },
   });
   if (isMobile) {
