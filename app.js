@@ -39,6 +39,7 @@ const FORWARD_HOOK = '0x636374702d666f727761726400000000000000000000000000000000
 const FORWARD_GRACE_MS = 10 * 60 * 1000;
 // Reown (WalletConnect) project ID, used when no injected wallet is present (e.g. mobile browsers).
 const WALLETCONNECT_PROJECT_ID = 'c001d9e3d0c6308a5ce7e5932d40064a';
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
 const erc20Abi = parseAbi([
   'function balanceOf(address) view returns (uint256)',
@@ -110,8 +111,12 @@ const fmtEth = (v) => Number(formatUnits(v, 18)).toLocaleString(undefined, { max
 // Where to look for the signing prompt. Over WalletConnect the request goes to the phone app,
 // which often shows nothing until it is opened.
 const inWallet = () => (viaWalletConnect
-  ? 'in your wallet app. Open it on your phone, as the request may not pop up by itself. If it shows the same request twice, confirm only once'
+  ? `in your wallet app${walletAppLink()}. Open it on your phone, as the request may not pop up by itself. If it shows the same request twice, confirm only once`
   : 'in your wallet');
+// On a phone connected to Rabby, link straight to the app so the user can jump there to confirm.
+const walletAppLink = () => (isMobile && /rabby/i.test(wcProvider?.session?.peer?.metadata?.name ?? '')
+  ? ' (<a href="rabby://">open Rabby</a>)'
+  : '');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const ethTx = (h) => `<a href="https://etherscan.io/tx/${h}" target="_blank" rel="noopener">${short(h)}</a>`;
@@ -222,7 +227,9 @@ async function getProvider() {
     chains: [mainnet.id],
     optionalChains: [base.id],
     rpcMap: { [mainnet.id]: 'https://ethereum-rpc.publicnode.com', [base.id]: 'https://mainnet.base.org' },
-    showQrModal: true,
+    // On phones the modal only offers the generic wc: link, which Rabby doesn't handle,
+    // so show our own buttons there instead (see below).
+    showQrModal: !isMobile,
     metadata: {
       name: 'eth2base',
       description: 'Bridge USDC from Ethereum to Base with CCTP',
@@ -230,7 +237,20 @@ async function getProvider() {
       icons: [],
     },
   });
-  await provider.enable();
+  if (isMobile) {
+    provider.on('display_uri', (uri) => {
+      $('wcRabby').href = `rabby://wc?uri=${encodeURIComponent(uri)}`;
+      $('wcOther').href = uri;
+      $('wcMobile').hidden = false;
+    });
+  }
+  try {
+    await (isMobile
+      ? Promise.race([provider.enable(), new Promise((_, reject) => { $('wcCancel').onclick = () => reject(new Error('cancelled')); })])
+      : provider.enable());
+  } finally {
+    $('wcMobile').hidden = true;
+  }
   provider.on('disconnect', () => { wcProvider = null; wallet = null; setAccount(null); });
   viaWalletConnect = true;
   wcProvider = provider;
@@ -681,7 +701,7 @@ $('connect').onclick = async () => {
       await connect();
     }
   } catch (e) {
-    alert(errMsg(e));
+    if (e?.message !== 'cancelled') alert(errMsg(e));
   }
 };
 $('bridge').onclick = bridge;

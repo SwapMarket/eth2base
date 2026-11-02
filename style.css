@@ -80,6 +80,19 @@ button {
   cursor: pointer;
 }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
+a.btn {
+  display: inline-block;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+a.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.wc-mobile { margin-top: 12px; }
+.wc-mobile p { margin: 0 0 10px; font-size: 14px; }
 button.primary {
   width: 100%;
   margin-top: 18px;

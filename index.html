@@ -18,6 +18,14 @@
         <span id="account" class="muted">Not connected</span>
         <button id="connect">Connect wallet</button>
       </div>
+      <div id="wcMobile" class="wc-mobile" hidden>
+        <p class="muted">Open your wallet app to approve the connection, then come back here.</p>
+        <div class="row">
+          <a id="wcRabby" class="btn primary">Open in Rabby</a>
+          <a id="wcOther" class="btn">Other wallet</a>
+          <button id="wcCancel" class="ghost" type="button">Cancel</button>
+        </div>
+      </div>
       <div id="balances" hidden>
         <div class="bal"><span class="chain">Ethereum</span><span class="vals"><span><b id="balEth">–</b> USDC</span><span><b id="gasEth">–</b> ETH gas</span></span></div>
         <div class="bal"><span class="chain">Base</span><span class="vals"><span><b id="balBase">–</b> USDC</span><span><b id="balEurc">–</b> EURC</span><span><b id="gasBase">–</b> ETH gas</span></span></div>
