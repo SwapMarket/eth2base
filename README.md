@@ -27,7 +27,8 @@ It can be deployed as-is to GitHub Pages, Netlify, Cloudflare Pages, etc.
 4. **Track**: poll `GET https://iris-api.circle.com/v2/messages/0?transactionHash=…` until `forwardTxHash` (the Base mint) appears.
    If the message is attested but not forwarded within 10 minutes, the page offers a manual
    `MessageTransmitterV2.receiveMessage` on Base as a fallback. That fallback needs ETH on Base.
-5. **Optional, swap to EURC**: if "Receive as EURC" is chosen, the recipient (which must be the connected wallet) swaps the bridged USDC
+5. **Optional, swap to EURC**: if "Receive as EURC" is chosen, the USDC is minted to the connected wallet, which swaps it
+   and sends the EURC to the recipient (the connected wallet by default, or the address entered). The swap uses the bridged USDC
    on Aerodrome Slipstream: `approve` + `SwapRouter.exactInputSingle` (router `0xBE6D…18a5`, quoter `0x254c…15b0`). The page uses
    the better of the tick-spacing 1 and 50 USDC/EURC pools, with 0.5% max slippage. It swaps only `amount - feeExecuted` of this
    transfer, never other USDC in the wallet. This step needs a little ETH on Base for gas, because Circle's forwarder can only deliver USDC.

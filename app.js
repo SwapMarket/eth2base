@@ -94,7 +94,7 @@ let pendingMint = null; // { message, attestation, nonce } for the manual fallba
 let manualMintTx = null;
 let viaWalletConnect = false;
 let wcProvider = null;
-let pendingSwap = null; // { burned, amountIn, recipient } for the EURC swap
+let pendingSwap = null; // { burned, amountIn, signer, to } for the EURC swap: signer holds the USDC, `to` gets the EURC
 
 // ---------- UI helpers ----------
 
@@ -256,6 +256,7 @@ function refreshForm() {
     el.textContent = fees ? `· fee ≤ ${fmt(maxFeeFor(amt ?? 0n, mode))} USDC` : '';
   }
 
+  $('recipientLabel').textContent = currentOut() === 'EURC' ? 'EURC recipient on Base' : 'Recipient on Base';
   let label = 'Bridge to Base';
   let ok = !!account && !!amt && !!fees;
   let receive = '';
@@ -498,20 +499,20 @@ async function bridge() {
   await askNotifications();
   const mode = currentMode();
 
-  let recipient = $('recipient').value.trim();
+  let recipient = $('recipient').value.trim() || null;
   if (recipient) {
     if (!isAddress(recipient)) { alert('Recipient is not a valid address.'); return; }
     recipient = getAddress(recipient);
-  } else {
-    if (await isContractAccount(account)) {
-      alert('Your account is a smart-contract wallet, which may not exist at the same address on Base. Enter a recipient address you control on Base.');
-      return;
-    }
-    recipient = account;
   }
   const out = currentOut();
-  if (out === 'EURC' && recipient !== account) {
-    alert('To receive EURC, the recipient must be your connected address: the swap on Base is signed by the wallet that receives the USDC.');
+  // For EURC the USDC is minted to the connected wallet, which signs the swap on Base;
+  // the recipient only gets the EURC from the swap.
+  const mintTo = out === 'EURC' ? account : recipient ?? account;
+  const eurcTo = out === 'EURC' ? recipient ?? account : null;
+  if (mintTo === account && await isContractAccount(account)) {
+    alert(out === 'EURC'
+      ? 'Your account is a smart-contract wallet, which may not exist at the same address on Base. Receiving EURC needs a regular wallet: it receives the USDC on Base and signs the swap there.'
+      : 'Your account is a smart-contract wallet, which may not exist at the same address on Base. Enter a recipient address you control on Base.');
     return;
   }
 
@@ -557,7 +558,7 @@ async function bridge() {
         send: () => wallet.writeContract({
           account, chain: mainnet, address: TOKEN_MESSENGER, abi: tokenMessengerAbi,
           functionName: 'depositForBurnWithHook',
-          args: [amount, DOMAIN_BASE, pad(recipient, { size: 32 }), USDC_ETH, zeroHash, maxFee, FINALITY[mode], FORWARD_HOOK],
+          args: [amount, DOMAIN_BASE, pad(mintTo, { size: 32 }), USDC_ETH, zeroHash, maxFee, FINALITY[mode], FORWARD_HOOK],
         }),
         check: async () => {
           const logs = await ethClient.getLogs({
@@ -565,7 +566,7 @@ async function bridge() {
           });
           return logs.find((l) => l.args.amount === amount)?.transactionHash;
         },
-        onHash: (hash) => savePending(hash, out),
+        onHash: (hash) => savePending(hash, out, eurcTo),
       }));
     } catch (e) {
       if (/rejected|denied|reverted/i.test(errMsg(e))) clearPending(); // keep it on transient RPC errors
@@ -574,7 +575,7 @@ async function bridge() {
     setStep('burn', 'done');
     refreshBalances();
 
-    await finish(await track(burnHash, mode), out);
+    await finish(await track(burnHash, mode), out, eurcTo);
   } catch (e) {
     console.error(e);
     setStatus(errMsg(e), 'err');
@@ -591,7 +592,7 @@ async function resume() {
   setStep('approve', 'done');
   setStep('burn', 'done');
   try {
-    await finish(await track(hash), currentOut());
+    await finish(await track(hash), currentOut(), eurcRecipientFor(hash));
   } catch (e) {
     console.error(e);
     setStatus(errMsg(e), 'err');
@@ -599,7 +600,7 @@ async function resume() {
 }
 
 // After the USDC is on Base: done, or continue with the Aerodrome swap.
-async function finish({ message: m, mintTx }, out) {
+async function finish({ message: m, mintTx }, out, eurcTo) {
   clearPending();
   refreshBalances();
   const minted = mintTx ? `USDC minted on Base ${baseTx(mintTx)}` : 'USDC is on Base';
@@ -614,7 +615,8 @@ async function finish({ message: m, mintTx }, out) {
   }
   // Swap only what this transfer delivered, never other USDC in the wallet.
   const fee = BigInt(body.feeExecuted ?? body.maxFee ?? 0);
-  pendingSwap = { burned: BigInt(body.amount), amountIn: BigInt(body.amount) - fee, recipient: getAddress(`0x${body.mintRecipient.slice(-40)}`) };
+  const signer = getAddress(`0x${body.mintRecipient.slice(-40)}`);
+  pendingSwap = { burned: BigInt(body.amount), amountIn: BigInt(body.amount) - fee, signer, to: eurcTo ?? signer };
   setStatus(`${minted}. Now swapping to EURC…`);
   await swapToEurc();
 }
@@ -718,16 +720,17 @@ async function manualMint() {
   }
 }
 
-// Swap the bridged USDC to EURC on Aerodrome Slipstream, signed by the recipient on Base.
+// Swap the bridged USDC to EURC on Aerodrome Slipstream, signed by the wallet the USDC was minted to,
+// sending the EURC to the chosen recipient.
 async function swapToEurc() {
   if (!pendingSwap) return;
-  const { recipient } = pendingSwap;
+  const { signer, to } = pendingSwap;
   $('retrySwap').hidden = true;
   setStep('swap', 'active');
   try {
     if (!wallet) await connect();
     if (!account) throw new Error('Connect your wallet to swap.');
-    if (recipient !== account) throw new Error(`The USDC went to ${short(recipient)}. Connect that wallet to swap.`);
+    if (signer !== account) throw new Error(`The USDC went to ${short(signer)}. Connect that wallet to swap.`);
 
     const balance = await baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] });
     const amountIn = balance < pendingSwap.amountIn ? balance : pendingSwap.amountIn;
@@ -763,14 +766,14 @@ async function swapToEurc() {
       send: () => wallet.writeContract({
         account, chain: base, address: AERO_ROUTER, abi: routerAbi, functionName: 'exactInputSingle',
         args: [{
-          tokenIn: USDC_BASE, tokenOut: EURC_BASE, tickSpacing, recipient: account,
+          tokenIn: USDC_BASE, tokenOut: EURC_BASE, tickSpacing, recipient: to,
           deadline: BigInt(Math.floor(Date.now() / 1000) + 20 * 60),
           amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n,
         }],
       }),
       check: async () => {
         const logs = await baseClient.getLogs({
-          address: EURC_BASE, event: transferEvent, args: { to: account }, fromBlock,
+          address: EURC_BASE, event: transferEvent, args: { to }, fromBlock,
         });
         return logs.at(-1)?.transactionHash;
       },
@@ -778,12 +781,13 @@ async function swapToEurc() {
     const hash = r.transactionHash;
     setStep('swap', 'done');
     const eurcOut = parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: r.logs })
-      .filter((l) => l.address.toLowerCase() === EURC_BASE.toLowerCase() && l.args.to === account)
+      .filter((l) => l.address.toLowerCase() === EURC_BASE.toLowerCase() && l.args.to === to)
       .reduce((sum, l) => sum + l.args.value, 0n);
     // The rate is only end-to-end if the whole delivered amount was swapped.
     const rate = amountIn === pendingSwap.amountIn ? ` Effective EUR/USD ${eurUsd(pendingSwap.burned, eurcOut)}, all fees included.` : '';
     pendingSwap = null;
-    setStatus(`Done! Swapped ${fmt(amountIn)} USDC to ${fmt(eurcOut)} EURC on Aerodrome ${baseTx(hash)}.${rate}`, 'ok');
+    const dest = to === account ? '' : ` for ${short(to)}`;
+    setStatus(`Done! Swapped ${fmt(amountIn)} USDC to ${fmt(eurcOut)} EURC${dest} on Aerodrome ${baseTx(hash)}.${rate}`, 'ok');
     refreshBalances();
   } catch (e) {
     console.error(e);
@@ -794,8 +798,17 @@ async function swapToEurc() {
 
 // ---------- pending-burn persistence ----------
 
-function savePending(hash, out) {
-  try { localStorage.setItem(PENDING_KEY, JSON.stringify({ hash, out })); } catch {}
+function savePending(hash, out, eurcTo) {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify({ hash, out, eurcTo })); } catch {}
+}
+// EURC recipient for a resumed transfer: the one saved with it, else the recipient field, else the wallet.
+function eurcRecipientFor(hash) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PENDING_KEY) ?? '{}');
+    if (saved.hash === hash && saved.eurcTo) return saved.eurcTo;
+  } catch {}
+  const field = $('recipient').value.trim();
+  return isAddress(field) ? getAddress(field) : null;
 }
 function clearPending() {
   try { localStorage.removeItem(PENDING_KEY); } catch {}
