@@ -33,6 +33,9 @@ const GAS_UNITS = { approve: 70_000n, burn: 140_000n, swap: 320_000n };
 // Wallets often price Ethereum gas well above a very low network price (Rabby signed at ~0.7 gwei
 // while the network was at 0.04), so they need more ETH than the network cost. Used for the warning.
 const WALLET_MIN_GAS_PRICE_ETH = 500_000_000n; // 0.5 gwei
+// On Base Rabby priced ~1.5x the network (0.010 vs 0.006-0.008 gwei).
+const WALLET_MIN_GAS_PRICE_BASE = 15_000_000n; // 0.015 gwei
+const max = (a, b) => (a > b ? a : b);
 const DOMAIN_ETH = 0;
 const DOMAIN_BASE = 6;
 const IRIS = 'https://iris-api.circle.com';
@@ -167,7 +170,7 @@ function resetSteps() {
 }
 
 const fmt = (v) => Number(formatUnits(v, 6)).toLocaleString(undefined, { maximumFractionDigits: 6 });
-const fmtEth = (v) => Number(formatUnits(v, 18)).toLocaleString(undefined, { maximumFractionDigits: 6 });
+const fmtEth = (v) => Number(formatUnits(v, 18)).toLocaleString(undefined, { maximumSignificantDigits: 4 });
 // Where to look for the signing prompt. Over WalletConnect the request goes to the phone app,
 // which often shows nothing until it is opened.
 const inWallet = () => (viaWalletConnect
@@ -280,15 +283,20 @@ function refreshForm() {
     label = 'Insufficient USDC on Ethereum';
   } else if (account && amt && gas) {
     const ethUnits = (gas.allowance < amt ? GAS_UNITS.approve : 0n) + GAS_UNITS.burn;
-    const walletPrice = gas.ethPrice > WALLET_MIN_GAS_PRICE_ETH ? gas.ethPrice : WALLET_MIN_GAS_PRICE_ETH;
     if (gas.eth < ethUnits * gas.ethPrice) {
       ok = false;
       label = 'Not enough ETH for gas on Ethereum';
     } else if (currentOut() === 'EURC' && gas.base < GAS_UNITS.swap * gas.basePrice) {
       ok = false;
       label = 'Not enough ETH on Base for the swap gas';
-    } else if (gas.eth < ethUnits * walletPrice) {
-      gasWarn = `Low ETH for gas on Ethereum: you have ${fmtEth(gas.eth)} ETH, and wallets may ask for about ${fmtEth(ethUnits * walletPrice)} ETH.`;
+    } else {
+      const ethWallet = ethUnits * max(gas.ethPrice, WALLET_MIN_GAS_PRICE_ETH);
+      const baseWallet = GAS_UNITS.swap * max(gas.basePrice, WALLET_MIN_GAS_PRICE_BASE);
+      if (gas.eth < ethWallet) {
+        gasWarn = `Low ETH for gas on Ethereum: you have ${fmtEth(gas.eth)} ETH, and wallets may ask for about ${fmtEth(ethWallet)} ETH.`;
+      } else if (currentOut() === 'EURC' && gas.base < baseWallet) {
+        gasWarn = `Low ETH for the swap gas on Base: you have ${fmtEth(gas.base)} ETH, and wallets may ask for about ${fmtEth(baseWallet)} ETH.`;
+      }
     }
   }
   if (gasWarn !== $('gasWarn').textContent) $('gasWarn').textContent = gasWarn;
