@@ -206,18 +206,25 @@ let quoteTimer = null;
 // End-to-end EUR/USD: USDC sent from Ethereum per EURC received on Base, all fees included.
 const eurUsd = (usdcSent, eurcOut) => (Number(usdcSent) / Number(eurcOut)).toFixed(4);
 
-function showEurcQuote(usdcSent, usdcIn) {
+let shownQuoteKey = null; // amount:speed the displayed EURC quote was computed for
+
+function showEurcQuote(usdcSent, usdcIn, key) {
   const seq = ++quoteSeq;
   clearTimeout(quoteTimer);
   quoteTimer = setTimeout(async () => {
     let text;
+    let quoted = false;
     try {
       const { amountOut } = await quoteEurc(usdcIn);
+      quoted = true;
       text = `You receive about ${fmt(amountOut)} EURC on Base. Effective EUR/USD ${eurUsd(usdcSent, amountOut)}, all fees included (at least ${fmt(usdcIn)} USDC swapped at the current Aerodrome rate, max ${Number(SLIPPAGE_BPS) / 100}% slippage)`;
     } catch (e) {
+      if (key === shownQuoteKey) return; // keep the last good quote for this input
       text = 'Could not get an Aerodrome quote right now.';
     }
-    if (seq === quoteSeq) $('receive').textContent = text;
+    if (seq !== quoteSeq) return;
+    $('receive').textContent = text;
+    shownQuoteKey = quoted ? key : null;
   }, 400);
 }
 
@@ -241,7 +248,7 @@ function refreshForm() {
 
   let label = 'Bridge to Base';
   let ok = !!account && !!amt && !!fees;
-  $('receive').textContent = '';
+  let receive = '';
   if (!fees) {
     label = 'Loading fees…';
   } else if (amt) {
@@ -250,12 +257,16 @@ function refreshForm() {
       ok = false;
       label = 'Amount must be larger than the fee';
     } else if (currentOut() === 'EURC') {
-      $('receive').textContent = 'Getting Aerodrome quote…';
-      showEurcQuote(amt, amt - fee);
+      // Keep the shown quote while it refreshes for the same input, so the layout doesn't jump.
+      const key = `${amt}:${currentMode()}`;
+      receive = key === shownQuoteKey ? $('receive').textContent : 'Getting Aerodrome quote…';
+      showEurcQuote(amt, amt - fee, key);
     } else {
-      $('receive').textContent = `You receive at least ${fmt(amt - fee)} USDC on Base`;
+      receive = `You receive at least ${fmt(amt - fee)} USDC on Base`;
     }
   }
+  if (receive !== $('receive').textContent) $('receive').textContent = receive;
+  if (!receive.startsWith('You receive about')) shownQuoteKey = null;
   if (account && amt && amt > balanceEth) {
     ok = false;
     label = 'Insufficient USDC on Ethereum';
@@ -438,9 +449,11 @@ async function loadFees() {
     fees = { fast: pick(FINALITY.fast), standard: pick(FINALITY.standard) };
   } catch (e) {
     console.warn('fee fetch failed', e);
-    fees = null;
+    refreshForm();
+    return false; // keep the last good fees on screen
   }
   refreshForm();
+  return true;
 }
 
 async function bridge() {
@@ -470,8 +483,8 @@ async function bridge() {
   resetSteps();
   try {
     await ensureChain(mainnet);
-    await loadFees(); // forwarding fee tracks Base gas, so refresh right before burning
-    if (!fees) throw new Error('Could not load current fees from Circle. Try again.');
+    // Forwarding fee tracks Base gas, so require fresh fees right before burning.
+    if (!(await loadFees())) throw new Error('Could not load current fees from Circle. Try again.');
     const maxFee = maxFeeFor(amount, mode);
     if (amount <= maxFee) throw new Error('Amount must be larger than the fee.');
 
