@@ -94,7 +94,7 @@ let pendingMint = null; // { message, attestation, nonce } for the manual fallba
 let manualMintTx = null;
 let viaWalletConnect = false;
 let wcProvider = null;
-let pendingSwap = null; // { burned, amountIn, signer, to } for the EURC swap: signer holds the USDC, `to` gets the EURC
+let pendingSwap = null; // { burned, fee, amountIn, signer, to } for the EURC swap: signer holds the USDC, `to` gets the EURC
 
 // ---------- UI helpers ----------
 
@@ -520,9 +520,14 @@ async function bridge() {
   resetSteps();
   try {
     await ensureChain(mainnet);
-    // Forwarding fee tracks Base gas, so require fresh fees right before burning.
+    // Forwarding fee tracks Base gas, so require fresh fees right before burning, but never
+    // charge more than the fee the user saw: if it went up, show the new one and stop.
+    const shownFee = maxFeeFor(amount, mode);
     if (!(await loadFees())) throw new Error('Could not load current fees from Circle. Try again.');
     const maxFee = maxFeeFor(amount, mode);
+    if (maxFee > shownFee) {
+      throw new Error(`Circle's fee just went up from ${fmt(shownFee)} to ${fmt(maxFee)} USDC. Click Bridge again to accept it.`);
+    }
     if (amount <= maxFee) throw new Error('Amount must be larger than the fee.');
 
     // 1. Approve
@@ -603,21 +608,26 @@ async function resume() {
 async function finish({ message: m, mintTx }, out, eurcTo) {
   clearPending();
   refreshBalances();
-  const minted = mintTx ? `USDC minted on Base ${baseTx(mintTx)}` : 'USDC is on Base';
-  if (out !== 'EURC') {
-    setStatus(`Done! ${minted}.`, 'ok');
-    return;
-  }
+  const mintLink = mintTx ? ` ${baseTx(mintTx)}` : '';
   const body = m.decodedMessage?.decodedMessageBody;
   if (!body?.amount || !body?.mintRecipient) {
-    setStatus(`${minted}, but the transfer amount couldn't be read, so no swap was made.`, 'err');
+    setStatus(out === 'EURC'
+      ? `USDC is on Base${mintLink}, but the transfer amount couldn't be read, so no swap was made.`
+      : `Done! USDC minted on Base${mintLink}.`, out === 'EURC' ? 'err' : 'ok');
+    return;
+  }
+  const burned = BigInt(body.amount);
+  const fee = BigInt(body.feeExecuted ?? body.maxFee ?? 0);
+  const minted = burned - fee;
+  const signer = getAddress(`0x${body.mintRecipient.slice(-40)}`);
+  if (out !== 'EURC') {
+    const dest = signer === account ? '' : ` for ${short(signer)}`;
+    setStatus(`Done! ${fmt(burned)} USDC → ${fmt(minted)} USDC on Base${dest}${mintLink}. Circle's fee: ${fmt(fee)} USDC.`, 'ok');
     return;
   }
   // Swap only what this transfer delivered, never other USDC in the wallet.
-  const fee = BigInt(body.feeExecuted ?? body.maxFee ?? 0);
-  const signer = getAddress(`0x${body.mintRecipient.slice(-40)}`);
-  pendingSwap = { burned: BigInt(body.amount), amountIn: BigInt(body.amount) - fee, signer, to: eurcTo ?? signer };
-  setStatus(`${minted}. Now swapping to EURC…`);
+  pendingSwap = { burned, fee, amountIn: minted, signer, to: eurcTo ?? signer };
+  setStatus(`${fmt(minted)} USDC minted on Base${mintLink}. Now swapping to EURC…`);
   await swapToEurc();
 }
 
@@ -783,11 +793,13 @@ async function swapToEurc() {
     const eurcOut = parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: r.logs })
       .filter((l) => l.address.toLowerCase() === EURC_BASE.toLowerCase() && l.args.to === to)
       .reduce((sum, l) => sum + l.args.value, 0n);
-    // The rate is only end-to-end if the whole delivered amount was swapped.
-    const rate = amountIn === pendingSwap.amountIn ? ` Effective EUR/USD ${eurUsd(pendingSwap.burned, eurcOut)}, all fees included.` : '';
+    const { burned, fee } = pendingSwap;
     pendingSwap = null;
     const dest = to === account ? '' : ` for ${short(to)}`;
-    setStatus(`Done! Swapped ${fmt(amountIn)} USDC to ${fmt(eurcOut)} EURC${dest} on Aerodrome ${baseTx(hash)}.${rate}`, 'ok');
+    // The rate is only end-to-end if the whole delivered amount was swapped.
+    setStatus(amountIn === burned - fee
+      ? `Done! ${fmt(burned)} USDC → ${fmt(eurcOut)} EURC${dest}. Effective EUR/USD ${eurUsd(burned, eurcOut)}, all fees included (Circle's fee ${fmt(fee)} USDC, then the Aerodrome swap ${baseTx(hash)}).`
+      : `Done! Swapped ${fmt(amountIn)} USDC to ${fmt(eurcOut)} EURC${dest} on Aerodrome ${baseTx(hash)}.`, 'ok');
     refreshBalances();
   } catch (e) {
     console.error(e);
