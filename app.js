@@ -241,6 +241,17 @@ async function getProvider() {
     },
   });
   if (isMobile) {
+    // After each request WalletConnect redirects to the wallet stored under this key (normally set by
+    // its modal). Point it at Rabby, or clear it for other wallets so it doesn't fall back to the
+    // generic wc: link, which opens Android's app chooser.
+    const setDeepLink = (href) => {
+      try {
+        if (href) localStorage.setItem('WALLETCONNECT_DEEPLINK_CHOICE', JSON.stringify({ href, name: 'Rabby' }));
+        else localStorage.removeItem('WALLETCONNECT_DEEPLINK_CHOICE');
+      } catch {}
+    };
+    $('wcRabby').onclick = () => setDeepLink('rabby://');
+    $('wcOther').onclick = () => setDeepLink(null);
     provider.on('display_uri', (uri) => {
       $('wcRabby').href = `rabby://wc?uri=${encodeURIComponent(uri)}`;
       $('wcOther').href = uri;
