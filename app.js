@@ -10,6 +10,7 @@ import {
   getAddress,
   pad,
   parseAbi,
+  parseAbiItem,
   parseEventLogs,
   zeroHash,
 } from 'https://esm.sh/viem@2.21.55';
@@ -52,6 +53,8 @@ const transmitterAbi = parseAbi([
   'function receiveMessage(bytes message, bytes attestation) returns (bool)',
   'function usedNonces(bytes32) view returns (uint256)',
 ]);
+const depositForBurnEvent = parseAbiItem('event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)');
+const transferEvent = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
 const quoterAbi = parseAbi([
   'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, int24 tickSpacing, uint160 sqrtPriceLimitX96)) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
 ]);
@@ -105,7 +108,10 @@ const fmt = (v) => Number(formatUnits(v, 6)).toLocaleString(undefined, { maximum
 const fmtEth = (v) => Number(formatUnits(v, 18)).toLocaleString(undefined, { maximumFractionDigits: 6 });
 // Where to look for the signing prompt. Over WalletConnect the request goes to the phone app,
 // which often shows nothing until it is opened.
-const inWallet = () => (viaWalletConnect ? 'in your wallet app. Open it on your phone, as the request may not pop up by itself' : 'in your wallet');
+const inWallet = () => (viaWalletConnect
+  ? 'in your wallet app. Open it on your phone, as the request may not pop up by itself. If it shows the same request twice, confirm only once'
+  : 'in your wallet');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
 const ethTx = (h) => `<a href="https://etherscan.io/tx/${h}" target="_blank" rel="noopener">${short(h)}</a>`;
 const baseTx = (h) => `<a href="https://basescan.org/tx/${h}" target="_blank" rel="noopener">${short(h)}</a>`;
@@ -286,6 +292,40 @@ async function isContractAccount(addr) {
   return !!code && code !== '0x' && !code.toLowerCase().startsWith('0xef0100');
 }
 
+// Send a transaction and wait for it to be mined. Over WalletConnect the wallet's reply (the tx hash)
+// can get lost even though the transaction went out, so also watch the chain for its effect and carry
+// on as soon as either shows up. check() returns the mined tx hash, true (effect seen, hash unknown),
+// or nothing yet. Resolves to the receipt, or null when only the effect was seen.
+async function sendWatched({ client, send, check, label, link, onHash }) {
+  let watching = true;
+  const sent = send();
+  sent.catch(() => {}); // a rejection still reaches the race below
+  const seen = (async () => {
+    while (watching) {
+      await sleep(4000);
+      try {
+        const r = await check();
+        if (r) return r;
+      } catch (e) {
+        console.warn('chain watch failed', e);
+      }
+    }
+    return new Promise(() => {});
+  })();
+  let hash;
+  try {
+    hash = await Promise.race([sent, seen.then((r) => (r === true ? null : r))]);
+  } finally {
+    watching = false;
+  }
+  if (!hash) return null;
+  onHash?.(hash);
+  setStatus(`${label} sent ${link(hash)}, waiting for confirmation…`);
+  const receipt = await client.waitForTransactionReceipt({ hash });
+  if (receipt.status !== 'success') throw new Error(`${label} transaction reverted`);
+  return receipt;
+}
+
 // ---------- CCTP flow ----------
 
 async function loadFees() {
@@ -343,13 +383,16 @@ async function bridge() {
     });
     if (allowance < amount) {
       setStatus(`Confirm the USDC approval ${inWallet()}…`);
-      const hash = await wallet.writeContract({
-        account, chain: mainnet, address: USDC_ETH, abi: erc20Abi,
-        functionName: 'approve', args: [TOKEN_MESSENGER, amount],
+      await sendWatched({
+        client: ethClient, label: 'Approval', link: ethTx,
+        send: () => wallet.writeContract({
+          account, chain: mainnet, address: USDC_ETH, abi: erc20Abi,
+          functionName: 'approve', args: [TOKEN_MESSENGER, amount],
+        }),
+        check: async () => (await ethClient.readContract({
+          address: USDC_ETH, abi: erc20Abi, functionName: 'allowance', args: [account, TOKEN_MESSENGER],
+        })) >= amount,
       });
-      setStatus(`Approval sent ${ethTx(hash)}, waiting for confirmation…`);
-      const r = await ethClient.waitForTransactionReceipt({ hash });
-      if (r.status !== 'success') throw new Error('Approval transaction reverted');
       setStep('approve', 'done');
     } else {
       setStep('approve', 'skipped');
@@ -358,15 +401,28 @@ async function bridge() {
     // 2. Burn, with the forwarding hook so Circle mints on Base
     setStep('burn', 'active');
     setStatus(`Confirm the burn ${inWallet()}…`);
-    const burnHash = await wallet.writeContract({
-      account, chain: mainnet, address: TOKEN_MESSENGER, abi: tokenMessengerAbi,
-      functionName: 'depositForBurnWithHook',
-      args: [amount, DOMAIN_BASE, pad(recipient, { size: 32 }), USDC_ETH, zeroHash, maxFee, FINALITY[mode], FORWARD_HOOK],
-    });
-    savePending(burnHash, out);
-    setStatus(`Burn sent ${ethTx(burnHash)}, waiting for confirmation…`);
-    const r = await ethClient.waitForTransactionReceipt({ hash: burnHash });
-    if (r.status !== 'success') { clearPending(); throw new Error('Burn transaction reverted'); }
+    const fromBlock = await ethClient.getBlockNumber();
+    let burnHash;
+    try {
+      ({ transactionHash: burnHash } = await sendWatched({
+        client: ethClient, label: 'Burn', link: ethTx,
+        send: () => wallet.writeContract({
+          account, chain: mainnet, address: TOKEN_MESSENGER, abi: tokenMessengerAbi,
+          functionName: 'depositForBurnWithHook',
+          args: [amount, DOMAIN_BASE, pad(recipient, { size: 32 }), USDC_ETH, zeroHash, maxFee, FINALITY[mode], FORWARD_HOOK],
+        }),
+        check: async () => {
+          const logs = await ethClient.getLogs({
+            address: TOKEN_MESSENGER, event: depositForBurnEvent, args: { depositor: account }, fromBlock,
+          });
+          return logs.find((l) => l.args.amount === amount)?.transactionHash;
+        },
+        onHash: (hash) => savePending(hash, out),
+      }));
+    } catch (e) {
+      if (/rejected|denied|reverted/i.test(errMsg(e))) clearPending(); // keep it on transient RPC errors
+      throw e;
+    }
     setStep('burn', 'done');
     refreshBalances();
 
@@ -496,15 +552,16 @@ async function manualMint() {
     }
     await ensureChain(base);
     setStatus(`Confirm the mint on Base ${inWallet()}…`);
-    const hash = await wallet.writeContract({
-      account, chain: base, address: MESSAGE_TRANSMITTER, abi: transmitterAbi,
-      functionName: 'receiveMessage', args: [message, attestation],
+    const r = await sendWatched({
+      client: baseClient, label: 'Mint', link: baseTx,
+      send: () => wallet.writeContract({
+        account, chain: base, address: MESSAGE_TRANSMITTER, abi: transmitterAbi,
+        functionName: 'receiveMessage', args: [message, attestation],
+      }),
+      check: () => alreadyMinted(nonce),
     });
-    setStatus(`Mint sent ${baseTx(hash)}, waiting for confirmation…`);
-    const r = await baseClient.waitForTransactionReceipt({ hash });
-    if (r.status !== 'success') throw new Error('Mint transaction reverted');
-    manualMintTx = hash;
-    setStatus(`Minted on Base ${baseTx(hash)}, finishing up…`);
+    manualMintTx = r?.transactionHash ?? null;
+    setStatus(`Minted on Base${r ? ` ${baseTx(r.transactionHash)}` : ''}, finishing up…`);
   } catch (e) {
     console.error(e);
     $('manualMint').hidden = false;
@@ -536,29 +593,40 @@ async function swapToEurc() {
     });
     if (allowance < amountIn) {
       setStatus(`Confirm the USDC approval for Aerodrome ${inWallet()}…`);
-      const hash = await wallet.writeContract({
-        account, chain: base, address: USDC_BASE, abi: erc20Abi,
-        functionName: 'approve', args: [AERO_ROUTER, amountIn],
+      await sendWatched({
+        client: baseClient, label: 'Approval', link: baseTx,
+        send: () => wallet.writeContract({
+          account, chain: base, address: USDC_BASE, abi: erc20Abi,
+          functionName: 'approve', args: [AERO_ROUTER, amountIn],
+        }),
+        check: async () => (await baseClient.readContract({
+          address: USDC_BASE, abi: erc20Abi, functionName: 'allowance', args: [account, AERO_ROUTER],
+        })) >= amountIn,
       });
-      setStatus(`Approval sent ${baseTx(hash)}, waiting for confirmation…`);
-      const r = await baseClient.waitForTransactionReceipt({ hash });
-      if (r.status !== 'success') throw new Error('Approval transaction reverted');
     }
 
     const { amountOut, tickSpacing } = await quoteEurc(amountIn);
     const amountOutMinimum = (amountOut * (10_000n - SLIPPAGE_BPS)) / 10_000n;
     setStatus(`Confirm the swap of ${fmt(amountIn)} USDC for about ${fmt(amountOut)} EURC ${inWallet()}…`);
-    const hash = await wallet.writeContract({
-      account, chain: base, address: AERO_ROUTER, abi: routerAbi, functionName: 'exactInputSingle',
-      args: [{
-        tokenIn: USDC_BASE, tokenOut: EURC_BASE, tickSpacing, recipient: account,
-        deadline: BigInt(Math.floor(Date.now() / 1000) + 20 * 60),
-        amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n,
-      }],
+    const fromBlock = await baseClient.getBlockNumber();
+    const r = await sendWatched({
+      client: baseClient, label: 'Swap', link: baseTx,
+      send: () => wallet.writeContract({
+        account, chain: base, address: AERO_ROUTER, abi: routerAbi, functionName: 'exactInputSingle',
+        args: [{
+          tokenIn: USDC_BASE, tokenOut: EURC_BASE, tickSpacing, recipient: account,
+          deadline: BigInt(Math.floor(Date.now() / 1000) + 20 * 60),
+          amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n,
+        }],
+      }),
+      check: async () => {
+        const logs = await baseClient.getLogs({
+          address: EURC_BASE, event: transferEvent, args: { to: account }, fromBlock,
+        });
+        return logs.at(-1)?.transactionHash;
+      },
     });
-    setStatus(`Swap sent ${baseTx(hash)}, waiting for confirmation…`);
-    const r = await baseClient.waitForTransactionReceipt({ hash });
-    if (r.status !== 'success') throw new Error('Swap transaction reverted');
+    const hash = r.transactionHash;
     setStep('swap', 'done');
     const eurcOut = parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: r.logs })
       .filter((l) => l.address.toLowerCase() === EURC_BASE.toLowerCase() && l.args.to === account)
