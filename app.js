@@ -91,7 +91,35 @@ let pendingSwap = null; // { burned, amountIn, recipient } for the EURC swap
 function setStatus(html, kind = '') {
   $('status').className = 'status ' + kind;
   $('status').innerHTML = html;
+  notify($('status').textContent);
 }
+
+// ---------- notifications ----------
+
+// While the user is in their wallet app the page is in the background, so mirror status changes
+// into a single notification (same tag, replaced each time). Android Chrome only supports
+// notifications through a service worker.
+let swReg = null;
+navigator.serviceWorker?.register('sw.js').then((r) => { swReg = r; }).catch((e) => console.warn('service worker', e));
+
+async function askNotifications() {
+  try {
+    if (window.Notification?.permission === 'default') await Notification.requestPermission();
+  } catch {}
+}
+
+function notify(text) {
+  if (!document.hidden || !swReg || window.Notification?.permission !== 'granted') return;
+  // First sentence only; the rest is guidance for when the page is in view.
+  const body = text.split(/(?<=[.…])\s/)[0];
+  swReg.showNotification('eth2base', { body, tag: 'eth2base', renotify: true, icon: 'icon.png' }).catch(() => {});
+}
+
+// Back on the page: the notification has served its purpose.
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden || !swReg) return;
+  for (const n of await swReg.getNotifications({ tag: 'eth2base' })) n.close();
+});
 
 function setStep(name, state) {
   const li = document.querySelector(`#steps li[data-step="${name}"]`);
@@ -418,6 +446,7 @@ async function loadFees() {
 async function bridge() {
   const amount = parseAmount();
   if (!amount || !fees) return;
+  await askNotifications();
   const mode = currentMode();
 
   let recipient = $('recipient').value.trim();
@@ -508,6 +537,7 @@ async function bridge() {
 async function resume() {
   const hash = $('resumeHash').value.trim();
   if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) { alert('Enter a valid transaction hash.'); return; }
+  await askNotifications();
   resetSteps();
   setStep('approve', 'done');
   setStep('burn', 'done');
