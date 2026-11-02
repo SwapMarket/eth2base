@@ -27,6 +27,12 @@ const AERO_ROUTER = '0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5';
 const AERO_QUOTER = '0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0';
 const AERO_TICK_SPACINGS = [1, 50];
 const SLIPPAGE_BPS = 50n; // 0.5%
+// Gas limits with margin over observed usage: USDC approve ~36-56k, forwarded burn ~106-117k,
+// Aerodrome approve + swap ~280k.
+const GAS_UNITS = { approve: 70_000n, burn: 140_000n, swap: 320_000n };
+// Wallets often price Ethereum gas well above a very low network price (Rabby signed at ~0.7 gwei
+// while the network was at 0.04), so they need more ETH than the network cost. Used for the warning.
+const WALLET_MIN_GAS_PRICE_ETH = 500_000_000n; // 0.5 gwei
 const DOMAIN_ETH = 0;
 const DOMAIN_BASE = 6;
 const IRIS = 'https://iris-api.circle.com';
@@ -80,6 +86,7 @@ let wallet = null;
 let account = null;
 let fees = null; // { fast: { bps, forward }, standard: { bps, forward } }, forward in USDC base units
 let balanceEth = 0n;
+let gas = null; // { eth, base, allowance, ethPrice, basePrice }: ETH balances, USDC allowance, maxFeePerGas
 let pendingMint = null; // { message, attestation, nonce } for the manual fallback
 let manualMintTx = null;
 let viaWalletConnect = false;
@@ -267,10 +274,24 @@ function refreshForm() {
   }
   if (receive !== $('receive').textContent) $('receive').textContent = receive;
   if (!receive.startsWith('You receive about')) shownQuoteKey = null;
+  let gasWarn = '';
   if (account && amt && amt > balanceEth) {
     ok = false;
     label = 'Insufficient USDC on Ethereum';
+  } else if (account && amt && gas) {
+    const ethUnits = (gas.allowance < amt ? GAS_UNITS.approve : 0n) + GAS_UNITS.burn;
+    const walletPrice = gas.ethPrice > WALLET_MIN_GAS_PRICE_ETH ? gas.ethPrice : WALLET_MIN_GAS_PRICE_ETH;
+    if (gas.eth < ethUnits * gas.ethPrice) {
+      ok = false;
+      label = 'Not enough ETH for gas on Ethereum';
+    } else if (currentOut() === 'EURC' && gas.base < GAS_UNITS.swap * gas.basePrice) {
+      ok = false;
+      label = 'Not enough ETH on Base for the swap gas';
+    } else if (gas.eth < ethUnits * walletPrice) {
+      gasWarn = `Low ETH for gas on Ethereum: you have ${fmtEth(gas.eth)} ETH, and wallets may ask for about ${fmtEth(ethUnits * walletPrice)} ETH.`;
+    }
   }
+  if (gasWarn !== $('gasWarn').textContent) $('gasWarn').textContent = gasWarn;
   $('bridge').disabled = !ok;
   $('bridge').textContent = label;
 }
@@ -352,14 +373,21 @@ function setAccount(addr) {
 }
 
 async function refreshBalances() {
-  if (!account) { balanceEth = 0n; refreshForm(); return; }
-  const [e, b, eu, ge, gb] = await Promise.allSettled([
+  if (!account) { balanceEth = 0n; gas = null; refreshForm(); return; }
+  const [e, b, eu, ge, gb, al, fe, fb] = await Promise.allSettled([
     ethClient.readContract({ address: USDC_ETH, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
     baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
     baseClient.readContract({ address: EURC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
     ethClient.getBalance({ address: account }),
     baseClient.getBalance({ address: account }),
+    ethClient.readContract({ address: USDC_ETH, abi: erc20Abi, functionName: 'allowance', args: [account, TOKEN_MESSENGER] }),
+    ethClient.estimateFeesPerGas(),
+    baseClient.estimateFeesPerGas(),
   ]);
+  const ok = (r) => r.status === 'fulfilled';
+  gas = [ge, gb, al, fe, fb].every(ok)
+    ? { eth: ge.value, base: gb.value, allowance: al.value, ethPrice: fe.value.maxFeePerGas, basePrice: fb.value.maxFeePerGas }
+    : null;
   balanceEth = e.status === 'fulfilled' ? e.value : 0n;
   $('balEth').textContent = e.status === 'fulfilled' ? fmt(e.value) : 'error';
   $('balBase').textContent = b.status === 'fulfilled' ? fmt(b.value) : 'error';
@@ -809,4 +837,4 @@ if ($('commit').textContent.startsWith('__')) {
 
 loadPending();
 loadFees();
-setInterval(loadFees, 30_000);
+setInterval(() => { loadFees(); refreshBalances(); }, 30_000);
