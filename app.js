@@ -79,6 +79,7 @@ let balanceEth = 0n;
 let pendingMint = null; // { message, attestation, nonce } for the manual fallback
 let manualMintTx = null;
 let viaWalletConnect = false;
+let wcProvider = null;
 let pendingSwap = null; // { burned, amountIn, recipient } for the EURC swap
 
 // ---------- UI helpers ----------
@@ -230,8 +231,9 @@ async function getProvider() {
     },
   });
   await provider.enable();
-  provider.on('disconnect', () => setAccount(null));
+  provider.on('disconnect', () => { wcProvider = null; wallet = null; setAccount(null); });
   viaWalletConnect = true;
+  wcProvider = provider;
   return provider;
 }
 
@@ -246,8 +248,10 @@ async function connect() {
 function setAccount(addr) {
   account = addr ? getAddress(addr) : null;
   $('account').textContent = account ? `Connected${viaWalletConnect ? ' via WalletConnect' : ''}: ${short(account)}` : 'Not connected';
-  $('connect').textContent = account ? 'Connected' : 'Connect wallet';
-  $('connect').disabled = !!account;
+  // A WalletConnect session can be ended (also clears requests the wallet may still replay);
+  // an injected wallet is disconnected from the wallet itself.
+  $('connect').textContent = !account ? 'Connect wallet' : wcProvider ? 'Disconnect' : 'Connected';
+  $('connect').disabled = !!account && !wcProvider;
   $('balances').hidden = !account;
   refreshBalances();
 }
@@ -665,7 +669,21 @@ function loadPending() {
 
 // ---------- wire up ----------
 
-$('connect').onclick = () => connect().catch((e) => alert(errMsg(e)));
+$('connect').onclick = async () => {
+  try {
+    if (account && wcProvider) {
+      const p = wcProvider;
+      wcProvider = null;
+      wallet = null;
+      setAccount(null);
+      await p.disconnect();
+    } else {
+      await connect();
+    }
+  } catch (e) {
+    alert(errMsg(e));
+  }
+};
 $('bridge').onclick = bridge;
 $('resume').onclick = resume;
 $('manualMint').onclick = manualMint;
