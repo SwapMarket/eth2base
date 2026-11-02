@@ -97,10 +97,32 @@ function setStep(name, state) {
   const li = document.querySelector(`#steps li[data-step="${name}"]`);
   li.classList.remove('active', 'done', 'skipped');
   if (state) li.classList.add(state);
+  if (state === 'active') {
+    li.dataset.start = Date.now();
+    tickSteps();
+  }
 }
 
+// Running timer on the active step, so a long wait (mining, attestation) visibly progresses.
+function tickSteps() {
+  for (const li of document.querySelectorAll('#steps li.active')) {
+    const secs = Math.floor((Date.now() - Number(li.dataset.start)) / 1000);
+    let el = li.querySelector('.elapsed');
+    if (!el) {
+      el = document.createElement('span');
+      el.className = 'elapsed';
+      li.append(el);
+    }
+    el.textContent = ` · ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+  }
+}
+setInterval(tickSteps, 1000);
+
 function resetSteps() {
-  for (const li of document.querySelectorAll('#steps li')) li.className = '';
+  for (const li of document.querySelectorAll('#steps li')) {
+    li.className = '';
+    li.querySelector('.elapsed')?.remove();
+  }
   document.querySelector('#steps li[data-step="swap"]').hidden = currentOut() !== 'EURC';
   $('manualMint').hidden = true;
   $('retrySwap').hidden = true;
@@ -336,6 +358,10 @@ async function isContractAccount(addr) {
 // or nothing yet. Resolves to the receipt, or null when only the effect was seen.
 async function sendWatched({ client, send, check, label, link, onHash }) {
   let watching = true;
+  // A rise in the account's pending nonce means the signed tx reached the mempool,
+  // so the status can move on from "confirm in your wallet" before it is mined.
+  const baseNonce = client.getTransactionCount({ address: account, blockTag: 'pending' }).catch(() => null);
+  let submitted = false;
   const sent = send();
   sent.catch(() => {}); // a rejection still reaches the race below
   const seen = (async () => {
@@ -344,6 +370,12 @@ async function sendWatched({ client, send, check, label, link, onHash }) {
       try {
         const r = await check();
         if (r) return r;
+        const base = await baseNonce;
+        if (!submitted && watching && base !== null
+          && (await client.getTransactionCount({ address: account, blockTag: 'pending' })) > base) {
+          submitted = true;
+          if (watching) setStatus(`${label} submitted, waiting for it to be mined on ${client.chain.name}…`);
+        }
       } catch (e) {
         console.warn('chain watch failed', e);
       }

@@ -107,6 +107,7 @@ button.ghost { background: transparent; }
 #steps li.active { color: var(--text); font-weight: 600; }
 #steps li.done { color: var(--ok); }
 #steps li.done::after { content: " ✓"; }
+#steps .elapsed { font-weight: 400; color: var(--muted); font-variant-numeric: tabular-nums; }
 #steps li.skipped { color: var(--muted); text-decoration: line-through; }
 .status { margin-top: 12px; font-size: 14px; word-break: break-word; }
 .status.err { color: var(--err); }
