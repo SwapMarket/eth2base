@@ -39,6 +39,9 @@ It can be deployed as-is to GitHub Pages, Netlify, Cloudflare Pages, etc.
    the better of the tick-spacing 1 and 50 USDC/EURC pools, with 0.5% max slippage. It swaps only `amount - feeExecuted` of this
    transfer, never other USDC in the wallet. This step needs a little ETH on Base for gas, because Circle's forwarder can only deliver USDC.
    The page shows the end-to-end EUR/USD rate (USDC sent ÷ EURC received, all fees included), quoted before bridging and actual after the swap.
+   **Gas top-up** (optional, pre-ticked when Base ETH is low): 0.20 USDC of the bridged amount is swapped to WETH (Aerodrome USDC/WETH
+   pool) and unwrapped to the signer as ETH, in the same `multicall` transaction as the EURC swap, so it needs no extra signature.
+   The rate shown leaves the top-up out.
 
 The burn tx hash is saved in `localStorage`. **Resume a transfer** picks tracking back up after a reload.
 
