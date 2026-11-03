@@ -121,6 +121,7 @@ let pendingMint = null; // { message, attestation, nonce } for the manual fallba
 let manualMintTx = null;
 let viaWalletConnect = false;
 let wcProvider = null;
+let busy = false; // a transfer started from the form is in progress
 let pendingSwap = null; // { burned, fee, amountIn, signer, to, sent, sentAmount, before } for the EURC swap: signer holds the USDC, `to` gets the EURC
 
 // ---------- UI helpers ----------
@@ -426,6 +427,7 @@ function maxFeeFor(amount, mode, f = fees) {
 }
 
 function refreshForm() {
+  if (busy) return; // keep the form as submitted while a transfer runs
   quoteSeq++; // drop any in-flight EURC quote
   const src = currentSrc();
   const amt = parseAmount();
@@ -725,19 +727,19 @@ async function bridge() {
 
   $('bridge').disabled = true;
   resetSteps();
+  busy = true;
   const shownFees = fees;
   let source = null; // { amount, token, via } when the transfer started from USDT
+  let unburned = null; // USDC from the USDT swap that hasn't been burned yet
   try {
     await ensureChain(mainnet);
 
-    // 0. USDT → USDC. From here on it is a USDC transfer of what the swap delivered, and the form
-    // is switched to it, so if anything below stops, Bridge continues with that USDC.
+    // 0. USDT → USDC. From here on it is a USDC transfer of what the swap delivered.
     if (src === 'USDT') {
       const { received, via } = await swapUsdtToUsdc(amount);
       source = { amount, token: 'USDT', via };
       amount = received;
-      document.querySelector('input[name=src][value=USDC]').checked = true;
-      $('amount').value = formatUnits(received, 6);
+      unburned = received;
       refreshBalances();
     }
 
@@ -793,7 +795,7 @@ async function bridge() {
           });
           return logs.find((l) => l.args.amount === amount)?.transactionHash;
         },
-        onHash: (hash) => savePending(hash, out, eurcTo),
+        onHash: (hash) => { unburned = null; savePending(hash, out, eurcTo); },
       }));
     } catch (e) {
       if (/rejected|denied|reverted/i.test(errMsg(e))) clearPending(); // keep it on transient RPC errors
@@ -806,7 +808,14 @@ async function bridge() {
   } catch (e) {
     console.error(e);
     setStatus(errMsg(e), 'err');
+    // Stopped after the USDT swap but before the burn: set the form to bridge that USDC,
+    // so Bridge continues instead of swapping again.
+    if (unburned) {
+      document.querySelector('input[name=src][value=USDC]').checked = true;
+      $('amount').value = formatUnits(unburned, 6);
+    }
   } finally {
+    busy = false;
     refreshForm();
   }
 }
