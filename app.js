@@ -12,6 +12,8 @@ import {
   parseAbi,
   parseAbiItem,
   parseEventLogs,
+  encodeFunctionData,
+  decodeFunctionData,
   zeroHash,
 } from 'https://esm.sh/viem@2.21.55';
 import { mainnet, base } from 'https://esm.sh/viem@2.21.55/chains';
@@ -22,6 +24,14 @@ const MESSAGE_TRANSMITTER = '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64';
 const USDC_ETH = '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48';
 const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const EURC_BASE = '0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42';
+const USDT_ETH = '0xdAC17F958D2ee523a2206206994597C13D831ec7';
+// USDT → USDC on Ethereum: KyberSwap's aggregator (best price), with Uniswap v3's 0.01% pool as the
+// fallback and as an independent reference price for checking Kyber's routes.
+const KYBER_API = 'https://aggregator-api.kyberswap.com/ethereum/api/v1';
+const KYBER_ROUTER = '0x6131B5fae19EA4f9D964eAc0408E4408b66337b5';
+const UNI_ROUTER = '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45'; // SwapRouter02
+const UNI_QUOTER = '0x61fFE014bA17989E743c5F6cB21bF9697530B21e'; // QuoterV2
+const UNI_FEE = 100; // 0.01% USDT/USDC pool
 // Aerodrome Slipstream (concentrated liquidity) on Base; USDC/EURC liquidity sits in these tick spacings.
 const AERO_ROUTER = '0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5';
 const AERO_QUOTER = '0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0';
@@ -29,7 +39,8 @@ const AERO_TICK_SPACINGS = [1, 50];
 const SLIPPAGE_BPS = 50n; // 0.5%
 // Gas limits with margin over observed usage: USDC approve ~36-56k, forwarded burn ~106-117k,
 // Aerodrome approve + swap ~280k.
-const GAS_UNITS = { approve: 70_000n, burn: 140_000n, swap: 320_000n };
+// USDT → USDC: Kyber estimates up to ~450k depending on the route (Uniswap direct ~130k).
+const GAS_UNITS = { approve: 70_000n, burn: 140_000n, swap: 320_000n, usdtSwap: 450_000n };
 // Wallets often price Ethereum gas well above a very low network price (Rabby signed at ~0.7 gwei
 // while the network was at 0.04), so they need more ETH than the network cost. Used for the warning.
 const WALLET_MIN_GAS_PRICE_ETH = 500_000_000n; // 0.5 gwei
@@ -71,6 +82,18 @@ const transferEvent = parseAbiItem('event Transfer(address indexed from, address
 const quoterAbi = parseAbi([
   'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, int24 tickSpacing, uint160 sqrtPriceLimitX96)) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
 ]);
+const uniQuoterAbi = parseAbi([
+  'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96)) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
+]);
+const uniRouterAbi = parseAbi([
+  'function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)',
+]);
+// KyberSwap MetaAggregationRouterV2, used to check a built route before signing it.
+const kyberRouterAbi = parseAbi([
+  'struct SwapDescriptionV2 { address srcToken; address dstToken; address[] srcReceivers; uint256[] srcAmounts; address[] feeReceivers; uint256[] feeAmounts; address dstReceiver; uint256 amount; uint256 minReturnAmount; uint256 flags; bytes permit; }',
+  'struct SwapExecutionParams { address callTarget; address approveTarget; bytes targetData; SwapDescriptionV2 desc; bytes clientData; }',
+  'function swap(SwapExecutionParams execution) payable returns (uint256 returnAmount, uint256 gasUsed)',
+]);
 const routerAbi = parseAbi([
   'function exactInputSingle((address tokenIn, address tokenOut, int24 tickSpacing, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)',
 ]);
@@ -89,12 +112,13 @@ let wallet = null;
 let account = null;
 let fees = null; // { fast: { bps, forward }, standard: { bps, forward } }, forward in USDC base units
 let balanceEth = 0n;
+let balanceUsdt = 0n;
 let gas = null; // { eth, base, allowance, ethPrice, basePrice }: ETH balances, USDC allowance, maxFeePerGas
 let pendingMint = null; // { message, attestation, nonce } for the manual fallback
 let manualMintTx = null;
 let viaWalletConnect = false;
 let wcProvider = null;
-let pendingSwap = null; // { burned, fee, amountIn, signer, to } for the EURC swap: signer holds the USDC, `to` gets the EURC
+let pendingSwap = null; // { burned, fee, amountIn, signer, to, sent, sentAmount, before } for the EURC swap: signer holds the USDC, `to` gets the EURC
 
 // ---------- UI helpers ----------
 
@@ -162,6 +186,7 @@ function resetSteps() {
     li.querySelector('.elapsed')?.remove();
   }
   document.querySelector('#steps li[data-step="swap"]').hidden = currentOut() !== 'EURC';
+  document.querySelector('#steps li[data-step="swapIn"]').hidden = currentSrc() !== 'USDT';
   $('manualMint').hidden = true;
   $('retrySwap').hidden = true;
   manualMintTx = null;
@@ -211,14 +236,162 @@ async function quoteEurc(amountIn) {
   return ok.reduce((a, b) => (b.amountOut > a.amountOut ? b : a));
 }
 
+// ---------- USDT → USDC on Ethereum ----------
+
+const currentSrc = () => document.querySelector('input[name=src]:checked').value;
+const minOut = (amount) => (amount * (10_000n - SLIPPAGE_BPS)) / 10_000n;
+const isUserRejection = (e) => /rejected|denied/i.test(errMsg(e));
+
+async function uniswapQuote(amountIn) {
+  const { result } = await ethClient.simulateContract({
+    address: UNI_QUOTER, abi: uniQuoterAbi, functionName: 'quoteExactInputSingle',
+    args: [{ tokenIn: USDT_ETH, tokenOut: USDC_ETH, amountIn, fee: UNI_FEE, sqrtPriceLimitX96: 0n }],
+  });
+  return result[0];
+}
+
+async function kyberRoute(amountIn) {
+  const res = await fetch(`${KYBER_API}/routes?tokenIn=${USDT_ETH}&tokenOut=${USDC_ETH}&amountIn=${amountIn}`,
+    { headers: { 'x-client-id': 'eth2base' } });
+  const { code, data } = await res.json();
+  if (code !== 0 || getAddress(data.routerAddress) !== KYBER_ROUTER) throw new Error('KyberSwap route unavailable');
+  return { routeSummary: data.routeSummary, amountOut: BigInt(data.routeSummary.amountOut) };
+}
+
+// Best quote: KyberSwap when it is at least as good as Uniswap's pool. uniOut is kept as the
+// independent reference used to check Kyber's route.
+async function quoteUsdt(amountIn) {
+  const [k, u] = await Promise.allSettled([kyberRoute(amountIn), uniswapQuote(amountIn)]);
+  const uniOut = u.status === 'fulfilled' ? u.value : null;
+  if (k.status === 'fulfilled' && (uniOut === null || k.value.amountOut >= uniOut)) {
+    return { via: 'KyberSwap', amountOut: k.value.amountOut, uniOut };
+  }
+  if (uniOut !== null) return { via: 'Uniswap', amountOut: uniOut, uniOut };
+  throw new Error('No USDT → USDC quote right now');
+}
+
+// Build a Kyber swap and check it before signing: official router, USDT in, USDC out, the exact amount,
+// output to this wallet, no fee takers, and a guaranteed minimum no lower than `floor`.
+async function kyberSwapTx(amountIn, floor) {
+  const { routeSummary, amountOut } = await kyberRoute(amountIn);
+  const res = await fetch(`${KYBER_API}/route/build`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-client-id': 'eth2base' },
+    body: JSON.stringify({ routeSummary, sender: account, recipient: account, slippageTolerance: Number(SLIPPAGE_BPS), source: 'eth2base' }),
+  });
+  const { code, data } = await res.json();
+  if (code !== 0) throw new Error('KyberSwap could not build the swap');
+  if (getAddress(data.routerAddress) !== KYBER_ROUTER || BigInt(data.transactionValue ?? 0) !== 0n) throw new Error('Unexpected KyberSwap transaction');
+  const { functionName, args } = decodeFunctionData({ abi: kyberRouterAbi, data: data.data });
+  const d = args[0].desc;
+  const ok = functionName === 'swap'
+    && getAddress(d.srcToken) === USDT_ETH && getAddress(d.dstToken) === USDC_ETH
+    && d.amount === amountIn && getAddress(d.dstReceiver) === account
+    && d.feeReceivers.length === 0 && d.minReturnAmount >= floor;
+  if (!ok) throw new Error('KyberSwap route failed the safety checks');
+  return { via: 'KyberSwap', to: KYBER_ROUTER, data: data.data, expected: amountOut, spender: KYBER_ROUTER };
+}
+
+function uniswapSwapTx(amountIn, expected) {
+  return {
+    via: 'Uniswap', to: UNI_ROUTER, expected, spender: UNI_ROUTER,
+    data: encodeFunctionData({
+      abi: uniRouterAbi, functionName: 'exactInputSingle',
+      args: [{ tokenIn: USDT_ETH, tokenOut: USDC_ETH, fee: UNI_FEE, recipient: account, amountIn, amountOutMinimum: minOut(expected), sqrtPriceLimitX96: 0n }],
+    }),
+  };
+}
+
+// USDT's approve reverts when changing one non-zero allowance to another, so reset to 0 first.
+async function approveUsdt(spender, amount) {
+  const allowanceOf = () => ethClient.readContract({ address: USDT_ETH, abi: erc20Abi, functionName: 'allowance', args: [account, spender] });
+  const current = await allowanceOf();
+  if (current >= amount) return;
+  if (current > 0n) {
+    setStatus(`Confirm resetting the USDT approval to 0 (USDT requires this before a new approval) ${inWallet()}…`);
+    await sendWatched({
+      client: ethClient, label: 'Approval reset', link: ethTx,
+      send: () => wallet.writeContract({ account, chain: mainnet, address: USDT_ETH, abi: erc20Abi, functionName: 'approve', args: [spender, 0n] }),
+      check: async () => (await allowanceOf()) === 0n,
+    });
+  }
+  setStatus(`Confirm the USDT approval ${inWallet()}…`);
+  await sendWatched({
+    client: ethClient, label: 'Approval', link: ethTx,
+    send: () => wallet.writeContract({ account, chain: mainnet, address: USDT_ETH, abi: erc20Abi, functionName: 'approve', args: [spender, amount] }),
+    check: async () => (await allowanceOf()) >= amount,
+  });
+}
+
+// Swap USDT to USDC in the connected wallet. Resolves to { received, via }.
+async function swapUsdtToUsdc(amountIn) {
+  setStep('swapIn', 'active');
+  setStatus('Finding the best USDT → USDC route…');
+  const q = await quoteUsdt(amountIn);
+  // Kyber's guaranteed minimum must not be below Uniswap's quote less slippage (or 1:1 less slippage
+  // if Uniswap couldn't quote), so a bad route from the API can't lower the floor.
+  const floor = minOut(q.uniOut ?? amountIn);
+  let tx = null;
+  if (q.via === 'KyberSwap') {
+    try {
+      await approveUsdt(KYBER_ROUTER, amountIn);
+      tx = await kyberSwapTx(amountIn, floor);
+    } catch (e) {
+      if (isUserRejection(e)) throw e;
+      console.warn('KyberSwap failed, falling back to Uniswap', e);
+    }
+  }
+  if (!tx) {
+    tx = uniswapSwapTx(amountIn, q.uniOut ?? await uniswapQuote(amountIn));
+    await approveUsdt(UNI_ROUTER, amountIn);
+  }
+  setStatus(`Confirm the swap of ${fmt(amountIn)} USDT for about ${fmt(tx.expected)} USDC (${tx.via}) ${inWallet()}…`);
+  const fromBlock = await ethClient.getBlockNumber();
+  const r = await sendWatched({
+    client: ethClient, label: 'Swap', link: ethTx,
+    send: () => wallet.sendTransaction({ account, chain: mainnet, to: tx.to, data: tx.data }),
+    check: async () => (await ethClient.getLogs({
+      address: USDC_ETH, event: transferEvent, args: { to: account }, fromBlock,
+    })).at(-1)?.transactionHash,
+  });
+  const received = parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: r.logs })
+    .filter((l) => l.address.toLowerCase() === USDC_ETH.toLowerCase() && l.args.to === account)
+    .reduce((sum, l) => sum + l.args.value, 0n);
+  if (received === 0n) throw new Error('The swap delivered no USDC');
+  setStep('swapIn', 'done');
+  return { received, via: tx.via };
+}
+
+// Latest USDT quote for the form: { key, amountOut, via, at } or { key, error, at }.
+let usdtQuote = null;
+let usdtQuoteTimer = null;
+let usdtQuoteFor = null; // amount being quoted right now
+function requestUsdtQuote(amt) {
+  if (usdtQuoteFor === amt) return;
+  clearTimeout(usdtQuoteTimer);
+  usdtQuoteTimer = setTimeout(async () => {
+    usdtQuoteFor = amt;
+    try {
+      const { amountOut, via } = await quoteUsdt(amt);
+      usdtQuote = { key: amt, amountOut, via, at: Date.now() };
+    } catch (e) {
+      // Keep a good quote for the same amount on a failed refresh.
+      if (usdtQuote?.key !== amt || usdtQuote.error) usdtQuote = { key: amt, error: true, at: Date.now() };
+    } finally {
+      usdtQuoteFor = null;
+    }
+    if (parseAmount() === amt && currentSrc() === 'USDT') refreshForm();
+  }, 400);
+}
+
 let quoteSeq = 0;
 let quoteTimer = null;
-// End-to-end EUR/USD: USDC sent from Ethereum per EURC received on Base, all fees included.
+// End-to-end EUR/USD: USDC (or USDT) sent from Ethereum per EURC received on Base, all fees included.
 const eurUsd = (usdcSent, eurcOut) => (Number(usdcSent) / Number(eurcOut)).toFixed(4);
 
-let shownQuoteKey = null; // amount:speed the displayed EURC quote was computed for
+let shownQuoteKey = null; // source:amount:speed the displayed EURC quote was computed for
 
-function showEurcQuote(usdcSent, usdcIn, key) {
+function showEurcQuote(sent, usdcIn, key, usdtNote = '') {
   const seq = ++quoteSeq;
   clearTimeout(quoteTimer);
   quoteTimer = setTimeout(async () => {
@@ -227,7 +400,8 @@ function showEurcQuote(usdcSent, usdcIn, key) {
     try {
       const { amountOut } = await quoteEurc(usdcIn);
       quoted = true;
-      text = `You receive about ${fmt(amountOut)} EURC on Base. Effective EUR/USD ${eurUsd(usdcSent, amountOut)}, all fees included (at least ${fmt(usdcIn)} USDC swapped at the current Aerodrome rate, max ${Number(SLIPPAGE_BPS) / 100}% slippage)`;
+      const via = usdtNote ? `${usdtNote}, then about` : 'at least';
+      text = `You receive about ${fmt(amountOut)} EURC on Base. Effective EUR/USD ${eurUsd(sent, amountOut)}, all fees included (${via} ${fmt(usdcIn)} USDC swapped at the current Aerodrome rate, max ${Number(SLIPPAGE_BPS) / 100}% slippage)`;
     } catch (e) {
       if (key === shownQuoteKey) return; // keep the last good quote for this input
       text = 'Could not get an Aerodrome quote right now.';
@@ -241,8 +415,8 @@ function showEurcQuote(usdcSent, usdcIn, key) {
 // Max total fee (CCTP protocol fee + Circle forwarding fee, "high" tier) in USDC base units.
 // With forwarding, Circle charges the full maxFee, so there is no extra buffer.
 // It is deducted from the burned amount on Base, never charged on top.
-function maxFeeFor(amount, mode) {
-  const { bps, forward } = fees[mode];
+function maxFeeFor(amount, mode, f = fees) {
+  const { bps, forward } = f[mode];
   const ppm = BigInt(Math.ceil(bps * 100));
   const protocol = (amount * ppm + 999_999n) / 1_000_000n;
   return protocol + forward;
@@ -250,10 +424,23 @@ function maxFeeFor(amount, mode) {
 
 function refreshForm() {
   quoteSeq++; // drop any in-flight EURC quote
+  const src = currentSrc();
   const amt = parseAmount();
+  $('amountLabel').textContent = `Amount (${src})`;
+
+  // USDC that reaches the burn: the amount itself, or the USDT → USDC quote.
+  let usdc = amt;
+  let usdtNote = '';
+  if (src === 'USDT' && amt) {
+    const q = usdtQuote?.key === amt ? usdtQuote : null;
+    if (!q || Date.now() - q.at > 30_000) requestUsdtQuote(amt); // keeps showing q meanwhile
+    usdc = q && !q.error ? q.amountOut : null;
+    if (usdc) usdtNote = `${fmt(amt)} USDT → about ${fmt(usdc)} USDC via ${q.via}`;
+  }
+
   for (const mode of ['fast', 'standard']) {
     const el = $(mode === 'fast' ? 'feeFast' : 'feeStd');
-    el.textContent = fees ? `· fee ≤ ${fmt(maxFeeFor(amt ?? 0n, mode))} USDC` : '';
+    el.textContent = fees ? `· fee ≤ ${fmt(maxFeeFor(usdc ?? 0n, mode))} USDC` : '';
   }
 
   $('recipientLabel').textContent = currentOut() === 'EURC' ? 'EURC recipient on Base' : 'Recipient on Base';
@@ -262,28 +449,36 @@ function refreshForm() {
   let receive = '';
   if (!fees) {
     label = 'Loading fees…';
+  } else if (amt && !usdc) {
+    ok = false;
+    label = usdtQuote?.key === amt && usdtQuote.error ? 'No USDT → USDC route right now' : 'Getting USDT → USDC quote…';
   } else if (amt) {
-    const fee = maxFeeFor(amt, currentMode());
-    if (amt <= fee) {
+    const fee = maxFeeFor(usdc, currentMode());
+    if (usdc <= fee) {
       ok = false;
       label = 'Amount must be larger than the fee';
     } else if (currentOut() === 'EURC') {
       // Keep the shown quote while it refreshes for the same input, so the layout doesn't jump.
-      const key = `${amt}:${currentMode()}`;
+      const key = `${src}:${amt}:${currentMode()}`;
       receive = key === shownQuoteKey ? $('receive').textContent : 'Getting Aerodrome quote…';
-      showEurcQuote(amt, amt - fee, key);
+      showEurcQuote(amt, usdc - fee, key, usdtNote);
+    } else if (usdtNote) {
+      receive = `You receive about ${fmt(usdc - fee)} USDC on Base (${usdtNote}, then Circle's fee)`;
     } else {
-      receive = `You receive at least ${fmt(amt - fee)} USDC on Base`;
+      receive = `You receive at least ${fmt(usdc - fee)} USDC on Base`;
     }
   }
   if (receive !== $('receive').textContent) $('receive').textContent = receive;
-  if (!receive.startsWith('You receive about')) shownQuoteKey = null;
+  if (!receive.startsWith('You receive about') || !receive.includes('EURC')) shownQuoteKey = null;
+
   let gasWarn = '';
-  if (account && amt && amt > balanceEth) {
+  const balance = src === 'USDT' ? balanceUsdt : balanceEth;
+  if (account && amt && amt > balance) {
     ok = false;
-    label = 'Insufficient USDC on Ethereum';
-  } else if (account && amt && gas) {
-    const ethUnits = (gas.allowance < amt ? GAS_UNITS.approve : 0n) + GAS_UNITS.burn;
+    label = `Insufficient ${src} on Ethereum`;
+  } else if (account && amt && usdc && gas) {
+    const ethUnits = (src === 'USDT' ? GAS_UNITS.approve + GAS_UNITS.usdtSwap : 0n)
+      + (gas.allowance < usdc ? GAS_UNITS.approve : 0n) + GAS_UNITS.burn;
     if (gas.eth < ethUnits * gas.ethPrice) {
       ok = false;
       label = 'Not enough ETH for gas on Ethereum';
@@ -382,8 +577,8 @@ function setAccount(addr) {
 }
 
 async function refreshBalances() {
-  if (!account) { balanceEth = 0n; gas = null; refreshForm(); return; }
-  const [e, b, eu, ge, gb, al, fe, fb] = await Promise.allSettled([
+  if (!account) { balanceEth = 0n; balanceUsdt = 0n; gas = null; refreshForm(); return; }
+  const [e, b, eu, ge, gb, al, fe, fb, ut] = await Promise.allSettled([
     ethClient.readContract({ address: USDC_ETH, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
     baseClient.readContract({ address: USDC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
     baseClient.readContract({ address: EURC_BASE, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
@@ -392,6 +587,7 @@ async function refreshBalances() {
     ethClient.readContract({ address: USDC_ETH, abi: erc20Abi, functionName: 'allowance', args: [account, TOKEN_MESSENGER] }),
     ethClient.estimateFeesPerGas(),
     baseClient.estimateFeesPerGas(),
+    ethClient.readContract({ address: USDT_ETH, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
   ]);
   const ok = (r) => r.status === 'fulfilled';
   gas = [ge, gb, al, fe, fb].every(ok)
@@ -399,6 +595,8 @@ async function refreshBalances() {
     : null;
   balanceEth = e.status === 'fulfilled' ? e.value : 0n;
   $('balEth').textContent = e.status === 'fulfilled' ? fmt(e.value) : 'error';
+  balanceUsdt = ut.status === 'fulfilled' ? ut.value : 0n;
+  $('balUsdt').textContent = ut.status === 'fulfilled' ? fmt(ut.value) : 'error';
   $('balBase').textContent = b.status === 'fulfilled' ? fmt(b.value) : 'error';
   $('balEurc').textContent = eu.status === 'fulfilled' ? fmt(eu.value) : 'error';
   $('gasEth').textContent = ge.status === 'fulfilled' ? fmtEth(ge.value) : 'error';
@@ -494,8 +692,12 @@ async function loadFees() {
 }
 
 async function bridge() {
-  const amount = parseAmount();
+  let amount = parseAmount();
   if (!amount || !fees) return;
+  const src = currentSrc();
+  // USDC the user saw quoted (for USDT, the swap quote); fees are checked against it.
+  const shownUsdc = src === 'USDT' ? (usdtQuote?.key === amount && !usdtQuote.error ? usdtQuote.amountOut : null) : amount;
+  if (!shownUsdc) return;
   await askNotifications();
   const mode = currentMode();
 
@@ -518,15 +720,29 @@ async function bridge() {
 
   $('bridge').disabled = true;
   resetSteps();
+  const shownFees = fees;
+  let source = null; // { amount, token, via } when the transfer started from USDT
   try {
     await ensureChain(mainnet);
+
+    // 0. USDT → USDC. From here on it is a USDC transfer of what the swap delivered, and the form
+    // is switched to it, so if anything below stops, Bridge continues with that USDC.
+    if (src === 'USDT') {
+      const { received, via } = await swapUsdtToUsdc(amount);
+      source = { amount, token: 'USDT', via };
+      amount = received;
+      document.querySelector('input[name=src][value=USDC]').checked = true;
+      $('amount').value = formatUnits(received, 6);
+      refreshBalances();
+    }
+
     // Forwarding fee tracks Base gas, so require fresh fees right before burning, but never
     // charge more than the fee the user saw: if it went up, show the new one and stop.
-    const shownFee = maxFeeFor(amount, mode);
+    const shownFee = maxFeeFor(amount, mode, shownFees);
     if (!(await loadFees())) throw new Error('Could not load current fees from Circle. Try again.');
     const maxFee = maxFeeFor(amount, mode);
     if (maxFee > shownFee) {
-      throw new Error(`Circle's fee just went up from ${fmt(shownFee)} to ${fmt(maxFee)} USDC. Click Bridge again to accept it.`);
+      throw new Error(`${source ? `Swapped to ${fmt(amount)} USDC. ` : ''}Circle's fee just went up from ${fmt(shownFee)} to ${fmt(maxFee)} USDC. Click Bridge again to accept it.`);
     }
     if (amount <= maxFee) throw new Error('Amount must be larger than the fee.');
 
@@ -580,7 +796,7 @@ async function bridge() {
     setStep('burn', 'done');
     refreshBalances();
 
-    await finish(await track(burnHash, mode), out, eurcTo);
+    await finish(await track(burnHash, mode), out, eurcTo, source);
   } catch (e) {
     console.error(e);
     setStatus(errMsg(e), 'err');
@@ -605,7 +821,7 @@ async function resume() {
 }
 
 // After the USDC is on Base: done, or continue with the Aerodrome swap.
-async function finish({ message: m, mintTx }, out, eurcTo) {
+async function finish({ message: m, mintTx }, out, eurcTo, source = null) {
   clearPending();
   refreshBalances();
   const mintLink = mintTx ? ` ${baseTx(mintTx)}` : '';
@@ -620,13 +836,16 @@ async function finish({ message: m, mintTx }, out, eurcTo) {
   const fee = BigInt(body.feeExecuted ?? body.maxFee ?? 0);
   const minted = burned - fee;
   const signer = getAddress(`0x${body.mintRecipient.slice(-40)}`);
+  // What the user sent and what happened before the burn, for the done messages.
+  const sent = source ? `${fmt(source.amount)} USDT` : `${fmt(burned)} USDC`;
+  const before = source ? `USDT → ${fmt(burned)} USDC via ${source.via}, ` : '';
   if (out !== 'EURC') {
     const dest = signer === account ? '' : ` for ${short(signer)}`;
-    setStatus(`Done! ${fmt(burned)} USDC → ${fmt(minted)} USDC on Base${dest}${mintLink}. Circle's fee: ${fmt(fee)} USDC.`, 'ok');
+    setStatus(`Done! ${sent} → ${fmt(minted)} USDC on Base${dest}${mintLink}. Fees: ${before}Circle's fee ${fmt(fee)} USDC.`, 'ok');
     return;
   }
   // Swap only what this transfer delivered, never other USDC in the wallet.
-  pendingSwap = { burned, fee, amountIn: minted, signer, to: eurcTo ?? signer };
+  pendingSwap = { burned, fee, amountIn: minted, signer, to: eurcTo ?? signer, sent, sentAmount: source?.amount ?? burned, before };
   setStatus(`${fmt(minted)} USDC minted on Base${mintLink}. Now swapping to EURC…`);
   await swapToEurc();
 }
@@ -793,12 +1012,12 @@ async function swapToEurc() {
     const eurcOut = parseEventLogs({ abi: erc20Abi, eventName: 'Transfer', logs: r.logs })
       .filter((l) => l.address.toLowerCase() === EURC_BASE.toLowerCase() && l.args.to === to)
       .reduce((sum, l) => sum + l.args.value, 0n);
-    const { burned, fee } = pendingSwap;
+    const { burned, fee, sent, sentAmount, before } = pendingSwap;
     pendingSwap = null;
     const dest = to === account ? '' : ` for ${short(to)}`;
     // The rate is only end-to-end if the whole delivered amount was swapped.
     setStatus(amountIn === burned - fee
-      ? `Done! ${fmt(burned)} USDC → ${fmt(eurcOut)} EURC${dest}. Effective EUR/USD ${eurUsd(burned, eurcOut)}, all fees included (Circle's fee ${fmt(fee)} USDC, then the Aerodrome swap ${baseTx(hash)}).`
+      ? `Done! ${sent} → ${fmt(eurcOut)} EURC${dest}. Effective EUR/USD ${eurUsd(sentAmount, eurcOut)}, all fees included (${before}Circle's fee ${fmt(fee)} USDC, then the Aerodrome swap ${baseTx(hash)}).`
       : `Done! Swapped ${fmt(amountIn)} USDC to ${fmt(eurcOut)} EURC${dest} on Aerodrome ${baseTx(hash)}.`, 'ok');
     refreshBalances();
   } catch (e) {
@@ -859,8 +1078,8 @@ $('resume').onclick = resume;
 $('manualMint').onclick = manualMint;
 $('retrySwap').onclick = swapToEurc;
 $('amount').oninput = refreshForm;
-$('max').onclick = () => { $('amount').value = formatUnits(balanceEth, 6); refreshForm(); };
-for (const r of document.querySelectorAll('input[name=mode], input[name=out]')) r.onchange = refreshForm;
+$('max').onclick = () => { $('amount').value = formatUnits(currentSrc() === 'USDT' ? balanceUsdt : balanceEth, 6); refreshForm(); };
+for (const r of document.querySelectorAll('input[name=mode], input[name=out], input[name=src]')) r.onchange = refreshForm;
 
 // The deploy workflow stamps the commit into the footer; unstamped (local) copies link to the repo.
 if ($('commit').textContent.startsWith('__')) {

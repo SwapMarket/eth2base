@@ -29,13 +29,19 @@
         </div>
       </div>
       <div id="balances" hidden>
-        <div class="bal"><span class="chain">Ethereum</span><span class="vals"><span><b id="balEth">–</b> USDC</span><span><b id="gasEth">–</b> ETH gas</span></span></div>
+        <div class="bal"><span class="chain">Ethereum</span><span class="vals"><span><b id="balEth">–</b> USDC</span><span><b id="balUsdt">–</b> USDT</span><span><b id="gasEth">–</b> ETH gas</span></span></div>
         <div class="bal"><span class="chain">Base</span><span class="vals"><span><b id="balBase">–</b> USDC</span><span><b id="balEurc">–</b> EURC</span><span><b id="gasBase">–</b> ETH gas</span></span></div>
       </div>
     </section>
 
     <section class="card">
-      <label for="amount">Amount (USDC)</label>
+      <fieldset class="src">
+        <legend>Pay with</legend>
+        <label class="radio"><input type="radio" name="src" value="USDC" checked> USDC</label>
+        <label class="radio"><input type="radio" name="src" value="USDT"> USDT, swapped to USDC first <span class="muted">· KyberSwap, or Uniswap as fallback</span></label>
+      </fieldset>
+
+      <label for="amount" id="amountLabel">Amount (USDC)</label>
       <div class="row">
         <input id="amount" type="text" inputmode="decimal" placeholder="0.00" autocomplete="off">
         <button id="max" class="ghost" type="button">Max</button>
@@ -63,6 +69,7 @@
 
     <section class="card" id="progress" hidden>
       <ol id="steps">
+        <li data-step="swapIn" hidden>Swap USDT to USDC</li>
         <li data-step="approve">Approve USDC</li>
         <li data-step="burn">Burn on Ethereum</li>
         <li data-step="attest">Wait for Circle attestation</li>

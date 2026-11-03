@@ -17,7 +17,13 @@ It can be deployed as-is to GitHub Pages, Netlify, Cloudflare Pages, etc.
 ## Flow
 
 1. **Connect**: an injected wallet (browser extension, or a wallet app's in-app browser) if one is present, otherwise WalletConnect (QR code on desktop, deep link on mobile, e.g. Rabby on Android).
-2. **Approve**: `USDC.approve(TokenMessengerV2, amount)` on Ethereum, skipped if the allowance is already enough.
+2. **Optional, pay with USDT**: the USDT is first swapped to USDC on Ethereum, via KyberSwap's aggregator API when it quotes at
+   least as well as Uniswap v3's 0.01% USDT/USDC pool, otherwise via that pool (`SwapRouter02.exactInputSingle`). Before signing a
+   Kyber swap, the page decodes it and checks: the official router (`0x6131…37b5`), USDT in, USDC out, the exact amount, output to
+   the connected wallet, no fee receivers, and a guaranteed minimum no lower than the Uniswap quote less 0.5%. If any check fails
+   or Kyber is unreachable, it uses Uniswap. A non-zero USDT allowance is reset to 0 first (USDT requires it). The rest of the flow
+   bridges the USDC the swap delivered.
+   **Approve**: `USDC.approve(TokenMessengerV2, amount)` on Ethereum, skipped if the allowance is already enough.
 3. **Burn**: `TokenMessengerV2.depositForBurnWithHook(amount, 6, recipient, USDC, 0x0, maxFee, minFinalityThreshold, hookData)`.
    - `hookData` is Circle's Forwarding Service marker (`"cctp-forward"`, version 0), so **Circle mints on Base**. The user needs no ETH on Base.
    - `maxFee` = CCTP protocol fee + forwarding fee (`high` tier from `GET /v2/burn/USDC/fees/0/6?forward=true`).
