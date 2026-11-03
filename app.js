@@ -560,7 +560,9 @@ async function getProvider() {
     metadata: {
       name: 'eth2base',
       description: 'Bridge USDC from Ethereum to Base with CCTP',
-      url: location.origin,
+      // The page's own URL (not just the origin, which is a different site with its own favicon), so
+      // wallets that look up the site's icon find this one.
+      url: new URL('.', location.href).href,
       icons: [new URL('icon.png', location.href).href],
     },
   });
