@@ -1033,6 +1033,10 @@ async function swapToEurc() {
           address: USDC_BASE, abi: erc20Abi, functionName: 'allowance', args: [account, AERO_ROUTER],
         })) >= amountIn,
       });
+      // Give the wallet's own node time to see the approval: wallets simulate the swap before showing it,
+      // and one that is a block behind reports it "will fail".
+      const approvedAt = await baseClient.getBlockNumber();
+      while ((await baseClient.getBlockNumber()) < approvedAt + 2n) await sleep(1000);
     }
 
     // With the gas top-up, part of the USDC is swapped to WETH (kept in the router) and unwrapped to
