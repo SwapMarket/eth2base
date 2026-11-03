@@ -127,6 +127,7 @@ let account = null;
 let fees = null; // { fast: { bps, forward }, standard: { bps, forward } }, forward in USDC base units
 let balanceEth = 0n;
 let balanceUsdt = 0n;
+let balanceBaseUsdc = 0n;
 let gas = null; // { eth, base, allowance, ethPrice, basePrice }: ETH balances, USDC allowance, maxFeePerGas
 let pendingMint = null; // { message, attestation, nonce } for the manual fallback
 let manualMintTx = null;
@@ -198,6 +199,7 @@ setInterval(tickSteps, 1000);
 function resetSteps() {
   for (const li of document.querySelectorAll('#steps li')) {
     li.className = '';
+    li.hidden = false;
     li.querySelector('.elapsed')?.remove();
   }
   document.querySelector('#steps li[data-step="swap"]').hidden = currentOut() !== 'EURC';
@@ -476,6 +478,8 @@ function refreshForm() {
   const eurcOk = !gas || gas.base >= swapGas;
   const topUpOk = !gas || gas.base >= (GAS_UNITS.swap + GAS_UNITS.topUp) * gas.basePrice;
   eurcRadio.disabled = !eurcOk;
+  $('sweep').hidden = !account || !balanceBaseUsdc;
+  $('sweep').disabled = !eurcOk;
   if (!eurcOk && eurcRadio.checked) document.querySelector('input[name=out][value=USDC]').checked = true;
   $('eurcHint').textContent = eurcOk ? '· needs a little ETH on Base for gas'
     : `· needs ETH on Base for gas: you have ${fmtEth(gas.base)}, the swap takes about ${fmtEth(swapGas)}`;
@@ -639,6 +643,8 @@ async function refreshBalances() {
   balanceUsdt = ut.status === 'fulfilled' ? ut.value : 0n;
   $('balUsdt').textContent = ut.status === 'fulfilled' ? fmt(ut.value) : 'error';
   $('balBase').textContent = b.status === 'fulfilled' ? fmt(b.value) : 'error';
+  balanceBaseUsdc = b.status === 'fulfilled' ? b.value : 0n;
+  $('sweep').textContent = `Swap all ${fmt(balanceBaseUsdc)} Base USDC to EURC`;
   $('balEurc').textContent = eu.status === 'fulfilled' ? fmt(eu.value) : 'error';
   $('gasEth').textContent = ge.status === 'fulfilled' ? fmtEth(ge.value) : 'error';
   $('gasBase').textContent = gb.status === 'fulfilled' ? fmtEth(gb.value) : 'error';
@@ -1095,12 +1101,34 @@ async function swapToEurc() {
     // The rate is only end-to-end if the whole delivered amount was swapped; it leaves out the gas top-up.
     setStatus(amountIn === burned - fee
       ? `Done! ${sent} → ${fmt(eurcOut)} EURC${dest}${gasDone}. Effective EUR/USD ${eurUsd(sentAmount - topUp, eurcOut)}, all fees included (${before}Circle's fee ${fmt(fee)} USDC, then the Aerodrome swap ${baseTx(hash)}).`
-      : `Done! Swapped ${fmt(amountIn)} USDC to ${fmt(eurcOut)} EURC${dest}${gasDone} on Aerodrome ${baseTx(hash)}.`, 'ok');
+      : `Done! Swapped ${fmt(amountIn - topUp)} USDC to ${fmt(eurcOut)} EURC${dest}${gasDone} on Aerodrome ${baseTx(hash)}. Rate: EUR/USD ${eurUsd(amountIn - topUp, eurcOut)}.`, 'ok');
     refreshBalances();
   } catch (e) {
     console.error(e);
     setStatus(`Swap failed: ${errMsg(e)} Your USDC is safe on Base.`, 'err');
     $('retrySwap').hidden = false;
+  }
+}
+
+// Swap the wallet's whole Base USDC balance to EURC (e.g. USDC left from earlier transfers).
+async function sweep() {
+  if (!account || busy) return;
+  const r = $('recipient').value.trim();
+  if (r && !isAddress(r)) { alert('Recipient is not a valid address.'); return; }
+  busy = true;
+  $('sweep').disabled = true;
+  resetSteps();
+  for (const li of document.querySelectorAll('#steps li')) li.hidden = li.dataset.step !== 'swap';
+  // Not part of a transfer, so no end-to-end figures: the done message shows the swap's own rate.
+  pendingSwap = {
+    burned: 0n, fee: 0n, amountIn: 2n ** 255n, signer: account, to: r ? getAddress(r) : account,
+    topUp: !$('topUp').disabled && $('topUp').checked, sent: '', sentAmount: 0n, before: '',
+  };
+  try {
+    await swapToEurc();
+  } finally {
+    busy = false;
+    refreshBalances();
   }
 }
 
@@ -1154,6 +1182,7 @@ $('bridge').onclick = bridge;
 $('resume').onclick = resume;
 $('manualMint').onclick = manualMint;
 $('retrySwap').onclick = swapToEurc;
+$('sweep').onclick = sweep;
 $('amount').oninput = refreshForm;
 $('topUp').onchange = () => { topUpTouched = true; refreshForm(); };
 $('max').onclick = () => { $('amount').value = formatUnits(currentSrc() === 'USDT' ? balanceUsdt : balanceEth, 6); refreshForm(); };
