@@ -37,6 +37,9 @@ const AERO_ROUTER = '0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5';
 const AERO_QUOTER = '0x254cF9E1E6e233aa1AC962CB9B05b2cfeAaE15b0';
 const AERO_TICK_SPACINGS = [1, 50];
 const SLIPPAGE_BPS = 50n; // 0.5%
+// Paying with USDT, the USDT → USDC swap takes a minute, during which Circle's fee often moves a little.
+// Accept a rise up to this much then instead of stopping after the swap (paying with USDC: none).
+const USDT_FEE_TOLERANCE = 10_000n; // 0.01 USDC
 // Gas limits with margin over observed usage: USDC approve ~36-56k, forwarded burn ~106-117k,
 // Aerodrome approve + swap ~280k.
 // USDT → USDC: Kyber estimates up to ~450k depending on the route (Uniswap direct ~130k).
@@ -440,7 +443,9 @@ function refreshForm() {
 
   for (const mode of ['fast', 'standard']) {
     const el = $(mode === 'fast' ? 'feeFast' : 'feeStd');
-    el.textContent = fees ? `· fee ≤ ${fmt(maxFeeFor(usdc ?? 0n, mode))} USDC` : '';
+    const fee = fees ? maxFeeFor(usdc ?? 0n, mode) : null;
+    el.textContent = fee === null ? ''
+      : src === 'USDT' ? `· fee ≤ ${fmt(fee + USDT_FEE_TOLERANCE)} USDC` : `· fee ≤ ${fmt(fee)} USDC`;
   }
 
   $('recipientLabel').textContent = currentOut() === 'EURC' ? 'EURC recipient on Base' : 'Recipient on Base';
@@ -741,8 +746,9 @@ async function bridge() {
     const shownFee = maxFeeFor(amount, mode, shownFees);
     if (!(await loadFees())) throw new Error('Could not load current fees from Circle. Try again.');
     const maxFee = maxFeeFor(amount, mode);
-    if (maxFee > shownFee) {
-      throw new Error(`${source ? `Swapped to ${fmt(amount)} USDC. ` : ''}Circle's fee just went up from ${fmt(shownFee)} to ${fmt(maxFee)} USDC. Click Bridge again to accept it.`);
+    const allowedFee = shownFee + (source ? USDT_FEE_TOLERANCE : 0n); // what the form showed as "fee ≤"
+    if (maxFee > allowedFee) {
+      throw new Error(`${source ? `Swapped to ${fmt(amount)} USDC. ` : ''}Circle's fee just went up from ${fmt(allowedFee)} to ${fmt(maxFee)} USDC. Click Bridge again to accept it.`);
     }
     if (amount <= maxFee) throw new Error('Amount must be larger than the fee.');
 
