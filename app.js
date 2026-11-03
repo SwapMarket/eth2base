@@ -41,6 +41,8 @@ const AERO_TICK_SPACINGS = [1, 50];
 const WETH_BASE = '0x4200000000000000000000000000000000000006';
 const AERO_WETH_TICK_SPACINGS = [100, 1, 2000];
 const TOPUP_USDC = 200_000n; // 0.20 USDC
+// Pre-tick the top-up when Base ETH covers fewer than this many EURC swaps at the current gas price.
+const TOPUP_BELOW_SWAPS = 4n;
 const SLIPPAGE_BPS = 50n; // 0.5%
 // Paying with USDT, the USDT → USDC swap takes a minute, during which Circle's fee often moves a little.
 // Accept a rise up to this much then instead of stopping after the swap (paying with USDC: none).
@@ -252,6 +254,7 @@ const quoteEurc = (amountIn) => quoteAero(EURC_BASE, amountIn, AERO_TICK_SPACING
 const quoteTopUp = () => quoteAero(WETH_BASE, TOPUP_USDC, AERO_WETH_TICK_SPACINGS);
 const topUpOn = () => currentOut() === 'EURC' && $('topUp').checked;
 let topUpTouched = false; // the user ticked/unticked it; otherwise it follows the Base gas balance
+let topUpEth = null; // ETH that TOPUP_USDC buys right now, for the label
 
 // ---------- USDT → USDC on Ethereum ----------
 
@@ -466,11 +469,21 @@ function refreshForm() {
   }
 
   $('recipientLabel').textContent = currentOut() === 'EURC' ? 'EURC recipient on Base' : 'Recipient on Base';
+  // EURC needs the connected wallet to pay gas on Base for the swap (and a bit more with the top-up):
+  // disable the options it can't afford at the current network price.
+  const eurcRadio = document.querySelector('input[name=out][value=EURC]');
+  const swapGas = gas ? GAS_UNITS.swap * gas.basePrice : 0n;
+  const eurcOk = !gas || gas.base >= swapGas;
+  const topUpOk = !gas || gas.base >= (GAS_UNITS.swap + GAS_UNITS.topUp) * gas.basePrice;
+  eurcRadio.disabled = !eurcOk;
+  if (!eurcOk && eurcRadio.checked) document.querySelector('input[name=out][value=USDC]').checked = true;
+  $('eurcHint').textContent = eurcOk ? '· needs a little ETH on Base for gas'
+    : `· needs ETH on Base for gas: you have ${fmtEth(gas.base)}, the swap takes about ${fmtEth(swapGas)}`;
+  $('topUp').disabled = !topUpOk;
+  if (!topUpOk) $('topUp').checked = false;
+  else if (!topUpTouched && gas) $('topUp').checked = gas.base < TOPUP_BELOW_SWAPS * swapGas;
+  if (topUpEth) $('topUpEth').textContent = `about ${fmtEth(topUpEth)} ETH`;
   $('topUpRow').hidden = currentOut() !== 'EURC';
-  if (!topUpTouched && gas) {
-    // Suggest the top-up when Base ETH covers fewer than ~5 swaps at wallet prices.
-    $('topUp').checked = gas.base < 5n * GAS_UNITS.swap * max(gas.basePrice, WALLET_MIN_GAS_PRICE_BASE);
-  }
   const topUp = topUpOn() ? TOPUP_USDC : 0n;
   let label = 'Bridge to Base';
   let ok = !!account && !!amt && !!fees;
@@ -510,9 +523,6 @@ function refreshForm() {
     if (gas.eth < ethUnits * gas.ethPrice) {
       ok = false;
       label = 'Not enough ETH for gas on Ethereum';
-    } else if (currentOut() === 'EURC' && gas.base < (GAS_UNITS.swap + (topUp ? GAS_UNITS.topUp : 0n)) * gas.basePrice) {
-      ok = false;
-      label = 'Not enough ETH on Base for the swap gas';
     } else {
       const ethWallet = ethUnits * max(gas.ethPrice, WALLET_MIN_GAS_PRICE_ETH);
       const baseWallet = (GAS_UNITS.swap + (topUp ? GAS_UNITS.topUp : 0n)) * max(gas.basePrice, WALLET_MIN_GAS_PRICE_BASE);
@@ -618,6 +628,7 @@ async function refreshBalances() {
     ethClient.readContract({ address: USDT_ETH, abi: erc20Abi, functionName: 'balanceOf', args: [account] }),
   ]);
   const ok = (r) => r.status === 'fulfilled';
+  try { topUpEth = (await quoteTopUp()).amountOut; } catch {} // keep the last one on failure
   gas = [ge, gb, al, fe, fb].every(ok)
     ? { eth: ge.value, base: gb.value, allowance: al.value, ethPrice: fe.value.maxFeePerGas, basePrice: fb.value.maxFeePerGas }
     : null;

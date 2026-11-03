@@ -68,6 +68,7 @@ input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 fieldset { border: 0; padding: 0; margin: 14px 0 0; }
 fieldset.src { margin: 0 0 4px; }
 label.topup { margin-left: 26px; color: var(--muted); }
+label.radio:has(input:disabled) { opacity: 0.55; }
 legend { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
 label.radio { font-weight: 400; font-size: 14px; margin: 4px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
