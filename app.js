@@ -63,6 +63,9 @@ const DOMAIN_BASE = 6;
 const IRIS = 'https://iris-api.circle.com';
 const FINALITY = { fast: 1000, standard: 2000 };
 const PENDING_KEY = 'eth2base:pendingBurn';
+const FORM_KEY = 'eth2base:form'; // the form's choices, restored on reload
+const RECIPIENT_KEY = 'eth2base:recipient';
+const WALLET_KEY = 'eth2base:wallet'; // 'injected' or 'walletconnect': reconnected on reload
 // Circle Forwarding Service hook: "cctp-forward", version 0, no extra data.
 // Circle mints on Base and takes its fee out of the burned amount.
 const FORWARD_HOOK = '0x636374702d666f72776172640000000000000000000000000000000000000000';
@@ -255,7 +258,8 @@ async function quoteAero(tokenOut, amountIn, tickSpacings) {
 const quoteEurc = (amountIn) => quoteAero(EURC_BASE, amountIn, AERO_TICK_SPACINGS);
 const quoteTopUp = () => quoteAero(WETH_BASE, TOPUP_USDC, AERO_WETH_TICK_SPACINGS);
 const topUpOn = () => currentOut() === 'EURC' && $('topUp').checked;
-let topUpTouched = false; // the user ticked/unticked it; otherwise it follows the Base gas balance
+let topUpTouched = false;
+let preferredOut = 'USDC'; // the user's choice; EURC is re-selected when it becomes available again // the user ticked/unticked it; otherwise it follows the Base gas balance
 let topUpEth = null; // ETH that TOPUP_USDC buys right now, for the label
 
 // ---------- USDT → USDC on Ethereum ----------
@@ -471,6 +475,14 @@ function refreshForm() {
   }
 
   $('recipientLabel').textContent = currentOut() === 'EURC' ? 'EURC recipient on Base' : 'Recipient on Base';
+  // Say whose address the recipient is.
+  const typed = $('recipient').value.trim();
+  $('recipientHint').textContent = !typed
+    ? (account ? `Using your connected wallet (${short(account)}).` : '')
+    : !isAddress(typed) ? ''
+      : account && getAddress(typed) === account ? 'This is your connected wallet.'
+        : account ? `Not your connected wallet (${short(account)}): make sure you control this address on Base.`
+          : 'Make sure you control this address on Base.';
   // EURC needs the connected wallet to pay gas on Base for the swap (and a bit more with the top-up):
   // disable the options it can't afford at the current network price.
   const eurcRadio = document.querySelector('input[name=out][value=EURC]');
@@ -478,6 +490,7 @@ function refreshForm() {
   const eurcOk = !gas || gas.base >= swapGas;
   const topUpOk = !gas || gas.base >= (GAS_UNITS.swap + GAS_UNITS.topUp) * gas.basePrice;
   eurcRadio.disabled = !eurcOk;
+  if (eurcOk && preferredOut === 'EURC') eurcRadio.checked = true;
   $('sweep').hidden = !account || !balanceBaseUsdc;
   $('sweep').disabled = !eurcOk;
   if (!eurcOk && eurcRadio.checked) document.querySelector('input[name=out][value=USDC]').checked = true;
@@ -546,12 +559,18 @@ function refreshForm() {
 
 // Injected wallet (browser extension or wallet in-app browser) if present, else WalletConnect
 // so mobile wallet apps like Rabby can connect via QR code or deep link.
-async function getProvider() {
+// silent: only reconnect what was connected before, without prompts or a QR code; null if nothing.
+async function getProvider(silent = false) {
   if (window.ethereum) {
-    await window.ethereum.request({ method: 'eth_requestAccounts' });
+    if (silent) {
+      if (!(await window.ethereum.request({ method: 'eth_accounts' }))?.length) return null;
+    } else {
+      await window.ethereum.request({ method: 'eth_requestAccounts' });
+    }
     viaWalletConnect = false;
     return window.ethereum;
   }
+  if (silent && !Object.keys(localStorage).some((k) => k.startsWith('wc@2:'))) return null;
   const { EthereumProvider } = await import('https://esm.sh/@walletconnect/ethereum-provider@2.17.2');
   const provider = await EthereumProvider.init({
     projectId: WALLETCONNECT_PROJECT_ID,
@@ -570,7 +589,9 @@ async function getProvider() {
       icons: [new URL('icon.png', location.href).href],
     },
   });
-  if (isMobile) {
+  // A stored session is restored by init(); reuse it rather than pairing again.
+  if (silent && !provider.session) return null;
+  if (isMobile && !provider.session) {
     // After each request WalletConnect redirects to the wallet stored under this key (normally set by
     // its modal). Point it at Rabby, or clear it for other wallets so it doesn't fall back to the
     // generic wc: link, which opens Android's app chooser.
@@ -588,12 +609,14 @@ async function getProvider() {
       $('wcMobile').hidden = false;
     });
   }
-  try {
-    await (isMobile
-      ? Promise.race([provider.enable(), new Promise((_, reject) => { $('wcCancel').onclick = () => reject(new Error('cancelled')); })])
-      : provider.enable());
-  } finally {
-    $('wcMobile').hidden = true;
+  if (!provider.session) {
+    try {
+      await (isMobile
+        ? Promise.race([provider.enable(), new Promise((_, reject) => { $('wcCancel').onclick = () => reject(new Error('cancelled')); })])
+        : provider.enable());
+    } finally {
+      $('wcMobile').hidden = true;
+    }
   }
   provider.on('disconnect', () => { wcProvider = null; wallet = null; setAccount(null); });
   viaWalletConnect = true;
@@ -601,11 +624,14 @@ async function getProvider() {
   return provider;
 }
 
-async function connect() {
-  const provider = await getProvider();
+async function connect(silent = false) {
+  const provider = await getProvider(silent);
+  if (!provider) return;
   wallet = createWalletClient({ transport: custom(provider) });
-  const [addr] = await wallet.requestAddresses();
+  const [addr] = silent ? await wallet.getAddresses() : await wallet.requestAddresses();
+  if (!addr) return;
   setAccount(addr);
+  try { localStorage.setItem(WALLET_KEY, viaWalletConnect ? 'walletconnect' : 'injected'); } catch {}
   provider.on?.('accountsChanged', (accs) => setAccount(accs[0] ?? null));
 }
 
@@ -1156,8 +1182,35 @@ function loadPending() {
       const { hash, out } = raw.startsWith('{') ? JSON.parse(raw) : { hash: raw, out: 'USDC' };
       $('resumeHash').value = hash;
       $('resumeHash').closest('details').open = true;
-      document.querySelector(`input[name=out][value="${out === 'EURC' ? 'EURC' : 'USDC'}"]`).checked = true;
+      if (out === 'EURC') { preferredOut = 'EURC'; document.querySelector('input[name=out][value=EURC]').checked = true; }
     }
+  } catch {}
+}
+
+// ---------- form persistence ----------
+
+function saveForm() {
+  const v = (name) => document.querySelector(`input[name=${name}]:checked`).value;
+  try {
+    localStorage.setItem(FORM_KEY, JSON.stringify({
+      src: v('src'), amount: $('amount').value, out: preferredOut, mode: v('mode'), topUp: topUpTouched ? $('topUp').checked : null,
+    }));
+  } catch {}
+}
+function loadForm() {
+  try {
+    const f = JSON.parse(localStorage.getItem(FORM_KEY) ?? 'null');
+    if (f) {
+      const pick = (name, value) => { const el = document.querySelector(`input[name=${name}][value="${value}"]`); if (el) el.checked = true; };
+      pick('src', f.src);
+      pick('mode', f.mode);
+      if (f.amount) $('amount').value = f.amount;
+      preferredOut = f.out === 'EURC' ? 'EURC' : 'USDC';
+      pick('out', preferredOut);
+      if (f.topUp !== null && f.topUp !== undefined) { topUpTouched = true; $('topUp').checked = f.topUp; }
+    }
+    const to = localStorage.getItem(RECIPIENT_KEY);
+    if (to) $('recipient').value = to;
   } catch {}
 }
 
@@ -1170,6 +1223,7 @@ $('connect').onclick = async () => {
       wcProvider = null;
       wallet = null;
       setAccount(null);
+      try { localStorage.removeItem(WALLET_KEY); } catch {}
       await p.disconnect();
     } else {
       await connect();
@@ -1183,10 +1237,21 @@ $('resume').onclick = resume;
 $('manualMint').onclick = manualMint;
 $('retrySwap').onclick = swapToEurc;
 $('sweep').onclick = sweep;
-$('amount').oninput = refreshForm;
-$('topUp').onchange = () => { topUpTouched = true; refreshForm(); };
-$('max').onclick = () => { $('amount').value = formatUnits(currentSrc() === 'USDT' ? balanceUsdt : balanceEth, 6); refreshForm(); };
-for (const r of document.querySelectorAll('input[name=mode], input[name=out], input[name=src]')) r.onchange = refreshForm;
+$('amount').oninput = () => { refreshForm(); saveForm(); };
+$('recipient').oninput = () => {
+  refreshForm();
+  const r = $('recipient').value.trim();
+  try { if (!r) localStorage.removeItem(RECIPIENT_KEY); else if (isAddress(r)) localStorage.setItem(RECIPIENT_KEY, getAddress(r)); } catch {}
+};
+$('topUp').onchange = () => { topUpTouched = true; refreshForm(); saveForm(); };
+$('max').onclick = () => { $('amount').value = formatUnits(currentSrc() === 'USDT' ? balanceUsdt : balanceEth, 6); refreshForm(); saveForm(); };
+for (const r of document.querySelectorAll('input[name=mode], input[name=out], input[name=src]')) {
+  r.onchange = () => {
+    if (r.name === 'out') preferredOut = r.value;
+    refreshForm();
+    saveForm();
+  };
+}
 
 // The deploy workflow stamps the commit into the footer; unstamped (local) copies link to the repo.
 if ($('commit').textContent.startsWith('__')) {
@@ -1194,6 +1259,11 @@ if ($('commit').textContent.startsWith('__')) {
   $('commit').href = 'https://github.com/SwapMarket/eth2base';
 }
 
+loadForm();
 loadPending();
 loadFees();
+// Reconnect the wallet used last time (extension: silently; WalletConnect: the stored session, no QR).
+try {
+  if (localStorage.getItem(WALLET_KEY)) connect(true).catch((e) => console.warn('reconnect', e));
+} catch {}
 setInterval(() => { loadFees(); refreshBalances(); }, 30_000);
