@@ -570,7 +570,6 @@ async function getProvider(silent = false) {
     viaWalletConnect = false;
     return window.ethereum;
   }
-  if (silent && !Object.keys(localStorage).some((k) => k.startsWith('wc@2:'))) return null;
   const { EthereumProvider } = await import('https://esm.sh/@walletconnect/ethereum-provider@2.17.2');
   const provider = await EthereumProvider.init({
     projectId: WALLETCONNECT_PROJECT_ID,
