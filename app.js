@@ -47,6 +47,9 @@ const SLIPPAGE_BPS = 50n; // 0.5%
 // Paying with USDT, the USDT → USDC swap takes a minute, during which Circle's fee often moves a little.
 // Accept a rise up to this much then instead of stopping after the swap (paying with USDC: none).
 const USDT_FEE_TOLERANCE = 10_000n; // 0.01 USDC
+// Base → Ethereum: Circle's fee follows Ethereum gas and moves within seconds, so accept a rise up to this
+// much on that route (paid with USDC or EURC). It's included in the "fee ≤" the form shows.
+const TO_ETH_FEE_TOLERANCE = 20_000n; // 0.02 USDC
 // Gas limits with margin over observed usage: USDC approve ~36-56k, forwarded burn ~106-117k,
 // Aerodrome approve + swap ~280k.
 // USDT → USDC: Kyber estimates up to ~450k depending on the route (Uniswap direct ~130k).
@@ -640,7 +643,7 @@ function refreshFormToEth() {
   for (const m of ['fast', 'standard']) {
     const fee = feesToEth ? maxFeeFor(usdc ?? 0n, m, feesToEth) : null;
     $(m === 'fast' ? 'feeFast' : 'feeStd').textContent = fee === null ? ''
-      : `· fee ≤ ${fmt(fee + (srcB === 'EURC' ? USDT_FEE_TOLERANCE : 0n))} USDC`;
+      : `· fee ≤ ${fmt(fee + TO_ETH_FEE_TOLERANCE)} USDC`;
   }
 
   let label = 'Bridge to Ethereum';
@@ -666,7 +669,7 @@ function refreshFormToEth() {
     } else if (eurcNote) {
       receive = `You receive about ${fmt(usdc - fee)} USDC on Ethereum (${eurcNote}, then Circle's fee). Effective EUR/USD ${eurUsd(usdc - fee, amt)}, all fees included.`;
     } else {
-      receive = `You receive at least ${fmt(usdc - fee)} USDC on Ethereum`;
+      receive = `You receive at least ${fmt(usdc - fee - TO_ETH_FEE_TOLERANCE)} USDC on Ethereum`;
     }
   }
   if (receive !== $('receive').textContent) $('receive').textContent = receive;
@@ -1395,8 +1398,8 @@ async function bridgeToEth() {
   $('bridge').disabled = true;
   resetSteps('toEth');
   busy = true;
-  // Never charge more than the fee the user saw (plus a little when the amount comes from a swap).
-  const allowedFee = maxFeeFor(shownUsdc, mode, feesToEth) + (srcB === 'EURC' ? USDT_FEE_TOLERANCE : 0n);
+  // Never charge more than the "fee ≤" the user saw, which includes the route's tolerance.
+  const allowedFee = maxFeeFor(shownUsdc, mode, feesToEth) + TO_ETH_FEE_TOLERANCE;
   let source = null; // { amount, hash } when paid with EURC
   let unburned = null; // USDC from the EURC swap that hasn't been burned yet
   try {

@@ -55,6 +55,8 @@ MessageTransmitterV2 have the same addresses on both chains):
    so **Circle mints on Ethereum** and takes its fee from the amount. `maxFee` = protocol fee + forwarding fee
    (`high` tier from `GET /v2/burn/USDC/fees/6/0?forward=true`). The forwarding fee pays Circle's Ethereum gas, so it's much
    higher than for Ethereum → Base (about 0.6–1.0 USDC at the time of writing), and it moves with Ethereum gas prices.
+   Because it moves within seconds, this route accepts a rise of up to 0.02 USDC between showing the fee and burning;
+   the "fee ≤" the page shows includes it.
 3. **Track**: poll `GET /v2/messages/6?transactionHash=…` until `forwardTxHash` (the Ethereum mint). The manual-mint fallback
    calls `receiveMessage` on Ethereum.
 4. **Optional, receive USDT**: the USDC is minted to the connected wallet, which swaps it to USDT on Ethereum, using the same
