@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>eth2base — USDC Ethereum → Base via CCTP</title>
+  <title>eth2base — USDC Ethereum ⇄ Base via CCTP</title>
   <link rel="icon" type="image/png" href="icon.png">
   <link rel="apple-touch-icon" href="icon.png">
   <link rel="stylesheet" href="style.css?v=__COMMIT__">
@@ -12,7 +12,12 @@
   <main>
     <header>
       <h1>eth2base</h1>
-      <p class="sub">Move native USDC from Ethereum to Base with Circle's CCTP V2. You sign one burn on Ethereum, then Circle mints on Base and takes its fee out of the amount. You need no ETH on Base.</p>
+      <p class="sub" data-dir="toBase">Move native USDC from Ethereum to Base with Circle's CCTP V2. You sign one burn on Ethereum, then Circle mints on Base and takes its fee out of the amount. You need no ETH on Base.</p>
+      <p class="sub" data-dir="toEth" hidden>Move native USDC from Base to Ethereum with Circle's CCTP V2. You sign one burn on Base, then Circle mints on Ethereum and takes its fee out of the amount. You need a little ETH on Base, and no ETH on Ethereum.</p>
+      <div class="dir" role="radiogroup" aria-label="Direction">
+        <label><input type="radio" name="dir" value="toBase" checked> Ethereum → Base</label>
+        <label><input type="radio" name="dir" value="toEth"> Base → Ethereum</label>
+      </div>
     </header>
 
     <section class="card">
@@ -36,10 +41,15 @@
     </section>
 
     <section class="card">
-      <fieldset class="src">
+      <fieldset class="src" data-dir="toBase">
         <legend>Pay with</legend>
         <label class="radio"><input type="radio" name="src" value="USDC" checked> USDC</label>
         <label class="radio"><input type="radio" name="src" value="USDT"> USDT, swapped to USDC first <span class="muted">· KyberSwap, or Uniswap as fallback</span></label>
+      </fieldset>
+      <fieldset class="src" data-dir="toEth" hidden>
+        <legend>Pay with</legend>
+        <label class="radio"><input type="radio" name="srcB" value="USDC" checked> USDC</label>
+        <label class="radio"><input type="radio" name="srcB" value="EURC"> EURC, swapped to USDC first <span class="muted">· Aerodrome</span></label>
       </fieldset>
 
       <label for="amount" id="amountLabel">Amount (USDC)</label>
@@ -55,14 +65,19 @@
       <fieldset>
         <legend>Speed</legend>
         <label class="radio"><input type="radio" name="mode" value="fast" checked> Fast (about a minute) <span class="muted" id="feeFast"></span></label>
-        <label class="radio"><input type="radio" name="mode" value="standard"> Standard (about 15–20 min) <span class="muted" id="feeStd"></span></label>
+        <label class="radio"><input type="radio" name="mode" value="standard"> Standard (about 15–20 min, while <span id="finalChain">Ethereum</span> finalizes) <span class="muted" id="feeStd"></span></label>
       </fieldset>
 
-      <fieldset>
+      <fieldset data-dir="toBase">
         <legend>Receive as</legend>
         <label class="radio"><input type="radio" name="out" value="USDC" checked> USDC</label>
         <label class="radio"><input type="radio" name="out" value="EURC"> EURC, swapped on Aerodrome <span class="muted" id="eurcHint">· needs a little ETH on Base for gas</span></label>
         <label class="radio topup" id="topUpRow" hidden><input type="checkbox" id="topUp"> Top up gas: swap 0.20 USDC to <span id="topUpEth">ETH</span> on Base, in the same transaction</label>
+      </fieldset>
+      <fieldset data-dir="toEth" hidden>
+        <legend>Receive as</legend>
+        <label class="radio"><input type="radio" name="outE" value="USDC" checked> USDC</label>
+        <label class="radio"><input type="radio" name="outE" value="USDT"> USDT, swapped on Ethereum <span class="muted" id="usdtHint">· KyberSwap or Uniswap; needs a little ETH on Ethereum for gas</span></label>
       </fieldset>
 
       <p id="receive" class="receive"></p>
@@ -74,19 +89,19 @@
       <ol id="steps">
         <li data-step="swapIn" hidden>Swap USDT to USDC</li>
         <li data-step="approve">Approve USDC</li>
-        <li data-step="burn">Burn on Ethereum</li>
+        <li data-step="burn">Burn on <span class="src-chain">Ethereum</span></li>
         <li data-step="attest">Wait for Circle attestation</li>
         <li data-step="mint">Circle mints on Base</li>
         <li data-step="swap" hidden>Swap USDC to EURC on Aerodrome</li>
       </ol>
       <div id="status" class="status"></div>
-      <button id="manualMint" hidden>Mint manually on Base</button>
+      <button id="manualMint" hidden>Mint manually</button>
       <button id="retrySwap" hidden>Swap to EURC</button>
     </section>
 
     <details class="card">
       <summary>Resume a transfer</summary>
-      <p class="muted">Closed the page mid-transfer? Paste the burn transaction hash to check on it.</p>
+      <p class="muted">Closed the page mid-transfer? Paste the burn transaction hash (from Ethereum, or from Base for Base → Ethereum) to check on it.</p>
       <div class="row">
         <input id="resumeHash" type="text" placeholder="0x… burn tx hash" spellcheck="false">
         <button id="resume">Resume</button>
@@ -94,7 +109,7 @@
     </details>
 
     <footer class="muted">
-      Contracts: TokenMessengerV2 <code>0x28b5…cf5d</code>, MessageTransmitterV2 <code>0x81D4…4B64</code>. Attestations and the Base mint come from Circle (<code>iris-api.circle.com</code>, Forwarding Service).
+      Contracts: TokenMessengerV2 <code>0x28b5…cf5d</code>, MessageTransmitterV2 <code>0x81D4…4B64</code>. Attestations and the mint on the other chain come from Circle (<code>iris-api.circle.com</code>, Forwarding Service).
       Use at your own risk. <a id="commit" href="https://github.com/SwapMarket/eth2base/tree/__COMMIT__" target="_blank" rel="noopener" title="Source code at the deployed commit">__COMMIT_SHORT__</a>
     </footer>
   </main>

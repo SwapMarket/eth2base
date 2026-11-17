@@ -1,6 +1,6 @@
 # eth2base
 
-A static page that moves native USDC from Ethereum to Base using Circle's CCTP V2.
+A static page that moves native USDC between Ethereum and Base, in either direction, using Circle's CCTP V2.
 There's no build step and no backend. It uses viem and WalletConnect from esm.sh. The WalletConnect project ID is in `app.js`.
 
 ## Run
@@ -44,6 +44,25 @@ It can be deployed as-is to GitHub Pages, Netlify, Cloudflare Pages, etc.
    The rate shown leaves the top-up out.
 
 The burn tx hash is saved in `localStorage`. **Resume a transfer** picks tracking back up after a reload.
+
+## Base → Ethereum
+
+The direction switch at the top selects the reverse flow. It reuses the same contracts (TokenMessengerV2 and
+MessageTransmitterV2 have the same addresses on both chains):
+
+1. **Optional, pay with EURC**: the EURC is swapped to USDC on Aerodrome Slipstream first (approve + `exactInputSingle`).
+2. **Approve and burn on Base**: `depositForBurnWithHook(amount, 0, recipient, USDC_BASE, 0x0, maxFee, threshold, forwardHook)`,
+   so **Circle mints on Ethereum** and takes its fee from the amount. `maxFee` = protocol fee + forwarding fee
+   (`high` tier from `GET /v2/burn/USDC/fees/6/0?forward=true`). The forwarding fee pays Circle's Ethereum gas, so it's much
+   higher than for Ethereum → Base (about 0.6–1.0 USDC at the time of writing), and it moves with Ethereum gas prices.
+3. **Track**: poll `GET /v2/messages/6?transactionHash=…` until `forwardTxHash` (the Ethereum mint). The manual-mint fallback
+   calls `receiveMessage` on Ethereum.
+4. **Optional, receive USDT**: the USDC is minted to the connected wallet, which swaps it to USDT on Ethereum, using the same
+   KyberSwap/Uniswap code and safety checks as the USDT source above, run in reverse, and pays the recipient. This needs a
+   little ETH on Ethereum for gas.
+
+Standard transfers wait for Base to finalize (about 15–20 minutes). The page shows the effective EUR/USD when paying with
+EURC. Resume works with a Base burn hash too.
 
 ## Addresses (mainnet)
 
