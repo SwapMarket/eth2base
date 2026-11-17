@@ -53,7 +53,8 @@ MessageTransmitterV2 have the same addresses on both chains):
 1. **Optional, pay with EURC**: the EURC is swapped to USDC on Aerodrome Slipstream first (approve + `exactInputSingle`).
 2. **Approve and burn on Base**: `depositForBurnWithHook(amount, 0, recipient, USDC_BASE, 0x0, maxFee, threshold, forwardHook)`,
    so **Circle mints on Ethereum** and takes its fee from the amount. `maxFee` = protocol fee + forwarding fee
-   (`high` tier from `GET /v2/burn/USDC/fees/6/0?forward=true`). The forwarding fee pays Circle's Ethereum gas, so it's much
+   (`med` tier from `GET /v2/burn/USDC/fees/6/0?forward=true`: the minimum Circle's docs recommend; `high` costs about
+   $0.2 more on this route, and a cap below what forwarding needs can make a Fast transfer settle as Standard). The forwarding fee pays Circle's Ethereum gas, so it's much
    higher than for Ethereum → Base (about 0.6–1.0 USDC at the time of writing), and it moves with Ethereum gas prices.
    Because it moves within seconds, this route accepts a rise of up to 0.02 USDC between showing the fee and burning;
    the "fee ≤" the page shows includes it.

@@ -893,16 +893,18 @@ async function sendWatched({ client, send, check, label, link, onHash }) {
 
 async function loadFees() {
   try {
-    const route = async (src, dst) => {
+    const route = async (src, dst, tier) => {
       const list = await (await fetch(`${IRIS}/v2/burn/USDC/fees/${src}/${dst}?forward=true`)).json();
       const pick = (threshold) => {
         const f = list.find((x) => x.finalityThreshold === threshold);
         if (!f?.forwardFee) throw new Error('missing forward fee');
-        return { bps: f.minimumFee, forward: BigInt(f.forwardFee.high) };
+        return { bps: f.minimumFee, forward: BigInt(f.forwardFee[tier]) };
       };
       return { fast: pick(FINALITY.fast), standard: pick(FINALITY.standard) };
     };
-    [fees, feesToEth] = await Promise.all([route(DOMAIN_ETH, DOMAIN_BASE), route(DOMAIN_BASE, DOMAIN_ETH)]);
+    // Ethereum → Base: the "high" forwarding tier (cents either way). Base → Ethereum: "med", the tier Circle's docs
+    // recommend as the minimum; "high" costs about $0.2 more there because Circle pays Ethereum gas.
+    [fees, feesToEth] = await Promise.all([route(DOMAIN_ETH, DOMAIN_BASE, 'high'), route(DOMAIN_BASE, DOMAIN_ETH, 'med')]);
   } catch (e) {
     console.warn('fee fetch failed', e);
     refreshForm();
