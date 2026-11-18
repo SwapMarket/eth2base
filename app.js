@@ -761,7 +761,12 @@ async function getProvider(silent = false) {
       $('wcMobile').hidden = true;
     }
   }
-  provider.on('disconnect', () => { wcProvider = null; wallet = null; setAccount(null); });
+  provider.on('disconnect', () => {
+    wcProvider = null;
+    wallet = null;
+    setAccount(null);
+    try { localStorage.removeItem(WALLET_KEY); } catch {} // ended in the wallet: don't try to restore it
+  });
   viaWalletConnect = true;
   wcProvider = provider;
   return provider;
@@ -775,16 +780,36 @@ async function connect(silent = false) {
   if (!addr) return;
   setAccount(addr);
   try { localStorage.setItem(WALLET_KEY, viaWalletConnect ? 'walletconnect' : 'injected'); } catch {}
-  provider.on?.('accountsChanged', (accs) => setAccount(accs[0] ?? null));
+  if (!listening.has(provider)) {
+    listening.add(provider);
+    // Follow account switches in the wallet, unless the user disconnected it here.
+    provider.on?.('accountsChanged', (accs) => { if (wallet) setAccount(accs[0] ?? null); });
+  }
+}
+const listening = new WeakSet();
+
+// Disconnect: end a WalletConnect session, or ask an extension wallet to forget this site where it supports
+// that (MetaMask, Rabby); either way the page stops using the wallet and won't reconnect it on reload.
+async function disconnect() {
+  if (busy || !account) return;
+  const p = wcProvider;
+  wcProvider = null;
+  wallet = null;
+  setAccount(null);
+  try { localStorage.removeItem(WALLET_KEY); } catch {}
+  try {
+    if (p) await p.disconnect();
+    else await window.ethereum?.request({ method: 'wallet_revokePermissions', params: [{ eth_accounts: {} }] });
+  } catch (e) {
+    console.warn('disconnect', e);
+  }
 }
 
 function setAccount(addr) {
   account = addr ? getAddress(addr) : null;
   $('account').textContent = account ? `Connected${viaWalletConnect ? ' via WalletConnect' : ''}: ${short(account)}` : 'Not connected';
-  // A WalletConnect session can be ended (also clears requests the wallet may still replay);
-  // an injected wallet is disconnected from the wallet itself.
-  $('connect').textContent = !account ? 'Connect wallet' : wcProvider ? 'Disconnect' : 'Connected';
-  $('connect').disabled = !!account && !wcProvider;
+  $('connect').textContent = account ? 'Disconnect' : 'Connect wallet';
+  $('connect').disabled = false;
   $('balances').hidden = !account;
   refreshBalances();
 }
@@ -1606,16 +1631,8 @@ function loadForm() {
 
 $('connect').onclick = async () => {
   try {
-    if (account && wcProvider) {
-      const p = wcProvider;
-      wcProvider = null;
-      wallet = null;
-      setAccount(null);
-      try { localStorage.removeItem(WALLET_KEY); } catch {}
-      await p.disconnect();
-    } else {
-      await connect();
-    }
+    if (account) await disconnect();
+    else await connect();
   } catch (e) {
     if (e?.message !== 'cancelled') alert(errMsg(e));
   }
