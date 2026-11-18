@@ -702,10 +702,11 @@ function refreshFormToEth() {
 // ---------- wallet ----------
 
 // Injected wallet (browser extension or wallet in-app browser) if present, else WalletConnect
-// so mobile wallet apps like Rabby can connect via QR code or deep link.
+// so mobile wallet apps like Rabby can connect via QR code or deep link. With an extension present,
+// the separate WalletConnect button (useWc) still lets a phone wallet connect.
 // silent: only reconnect what was connected before, without prompts or a QR code; null if nothing.
-async function getProvider(silent = false) {
-  if (window.ethereum) {
+async function getProvider(silent = false, useWc = false) {
+  if (window.ethereum && !useWc) {
     if (silent) {
       if (!(await window.ethereum.request({ method: 'eth_accounts' }))?.length) return null;
     } else {
@@ -772,8 +773,8 @@ async function getProvider(silent = false) {
   return provider;
 }
 
-async function connect(silent = false) {
-  const provider = await getProvider(silent);
+async function connect(silent = false, useWc = false) {
+  const provider = await getProvider(silent, useWc);
   if (!provider) return;
   wallet = createWalletClient({ transport: custom(provider) });
   const [addr] = silent ? await wallet.getAddresses() : await wallet.requestAddresses();
@@ -810,6 +811,8 @@ function setAccount(addr) {
   $('account').textContent = account ? `Connected${viaWalletConnect ? ' via WalletConnect' : ''}: ${short(account)}` : 'Not connected';
   $('connect').textContent = account ? 'Disconnect' : 'Connect wallet';
   $('connect').disabled = false;
+  // A separate WalletConnect button, only when the main one would use the extension.
+  $('connectWc').hidden = !!account || !window.ethereum;
   $('balances').hidden = !account;
   refreshBalances();
 }
@@ -1637,6 +1640,13 @@ $('connect').onclick = async () => {
     if (e?.message !== 'cancelled') alert(errMsg(e));
   }
 };
+$('connectWc').onclick = async () => {
+  try {
+    await connect(false, true);
+  } catch (e) {
+    if (e?.message !== 'cancelled') alert(errMsg(e));
+  }
+};
 $('bridge').onclick = () => (currentDir() === 'toEth' ? bridgeToEth() : bridge());
 $('resume').onclick = resume;
 $('manualMint').onclick = manualMint;
@@ -1676,6 +1686,8 @@ loadPending();
 loadFees();
 // Reconnect the wallet used last time (extension: silently; WalletConnect: the stored session, no QR).
 try {
-  if (localStorage.getItem(WALLET_KEY)) connect(true).catch((e) => console.warn('reconnect', e));
+  const kind = localStorage.getItem(WALLET_KEY);
+  if (kind) connect(true, kind === 'walletconnect').catch((e) => console.warn('reconnect', e));
 } catch {}
+$('connectWc').hidden = !window.ethereum;
 setInterval(() => { loadFees(); refreshBalances(); }, 30_000);

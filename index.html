@@ -23,7 +23,10 @@
     <section class="card">
       <div class="row between">
         <span id="account" class="muted">Not connected</span>
-        <button id="connect">Connect wallet</button>
+        <span class="row">
+          <button id="connectWc" type="button" hidden>WalletConnect</button>
+          <button id="connect">Connect wallet</button>
+        </span>
       </div>
       <div id="wcMobile" class="wc-mobile" hidden>
         <p class="muted">Open your wallet app to approve the connection, then come back here.</p>
