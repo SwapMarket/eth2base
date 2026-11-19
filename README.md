@@ -21,7 +21,7 @@ Anyone can check that the published page is exactly what its source builds:
 
 ```sh
 ./check-page.sh                     # https://swapmarket.github.io/eth2base/
-./check-page.sh https://1cdzwdkc0uepk5ll8mhpcbyw3xh8gakldbfdq8fphhqnv503bceth2base.nsite.lol/   # the copy on Nostr
+./check-page.sh https://1cdzwdkc0uepk5ll8mhpcbyw3xh8gakldbfdq8fphhqnv503bceth2base.nwb.tf/   # the copy on Nostr
 ```
 
 It reads the commit from the page's footer, rebuilds that commit with its own `build.sh`, and compares every file with what the
