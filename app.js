@@ -18,6 +18,20 @@ import {
 } from 'https://esm.sh/viem@2.21.55';
 import { mainnet, base } from 'https://esm.sh/viem@2.21.55/chains';
 
+// The menu: on narrow screens the burger opens it over the page, and choosing a page closes it.
+{
+  const burger = document.getElementById('burger');
+  const menu = document.getElementById('collapse');
+  const set = (open) => {
+    menu.classList.toggle('open', open);
+    burger.classList.toggle('active', open);
+    document.body.classList.toggle('menu-open', open);
+    burger.setAttribute('aria-expanded', String(open));
+  };
+  burger.addEventListener('click', () => set(!menu.classList.contains('open')));
+  menu.addEventListener('click', (e) => { if (e.target.closest('a')) set(false); });
+}
+
 // CCTP V2 (same addresses on every supported chain).
 const TOKEN_MESSENGER = '0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d';
 const MESSAGE_TRANSMITTER = '0x81D40F21F12A8F0E3252Bccb954D722d4c464B64';

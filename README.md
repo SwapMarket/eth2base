@@ -79,3 +79,7 @@ EURC. Resume works with a Base burn hash too.
 
 - If the sender is a smart-contract wallet (such as a Safe), you must enter an explicit Base recipient, because the same address may not exist on Base.
 - The `destinationCaller` is zero, so anyone can submit the mint. Fast transfers are subject to Circle's fast-transfer allowance; if it's exhausted, the transfer settles at standard speed.
+
+## Licence
+
+AGPL-3.0-only (`LICENSE`). The menu, its burger and much of the styling come from SwapMarket/swapmarket.github.io and liq2sol's client, which are AGPL-3.0.
