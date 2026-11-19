@@ -1,7 +1,7 @@
 # eth2base
 
 A static page that moves native USDC between Ethereum and Base, in either direction, using Circle's CCTP V2.
-There's no build step and no backend. It uses viem and WalletConnect from esm.sh. The WalletConnect project ID is in `app.js`.
+There's no bundling and no backend. It uses viem and WalletConnect from esm.sh. The WalletConnect project ID is in `app.js`.
 
 ## Run
 
@@ -12,7 +12,20 @@ python3 -m http.server 8000
 # open http://localhost:8000
 ```
 
-It can be deployed as-is to GitHub Pages, Netlify, Cloudflare Pages, etc.
+It can be deployed as-is to GitHub Pages, Netlify, Cloudflare Pages, etc. The Pages deploy runs `./build.sh <commit>`, which only
+stamps the commit into `index.html`.
+
+## Check the live page
+
+Anyone can check that the published page is exactly what its source builds:
+
+```sh
+./check-page.sh                     # https://swapmarket.github.io/eth2base/
+./check-page.sh https://1cdzwdkc0uepk5ll8mhpcbyw3xh8gakldbfdq8fphhqnv503bceth2base.nsite.lol/   # the copy on Nostr
+```
+
+It reads the commit from the page's footer, rebuilds that commit with its own `build.sh`, and compares every file with what the
+site serves, byte for byte. It needs git and curl, and this repository with that commit fetched (it fetches if needed).
 
 ## Flow
 
